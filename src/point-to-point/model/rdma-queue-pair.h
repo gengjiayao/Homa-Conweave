@@ -74,6 +74,13 @@ class RdmaQueuePair : public Object {
      * runtime states
      *****************************/
     DataRate m_rate;  //< Current rate
+    
+    struct {
+        bool m_enabled{false};
+        uint64_t m_grantedBytes{0};
+        uint64_t m_init_grantedBytes{0};
+        DataRate m_curRate;
+    } homa;
     struct {
         DataRate m_targetRate;  //< Target rate
         EventId m_eventUpdateAlpha;

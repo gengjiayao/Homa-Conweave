@@ -48,6 +48,9 @@
 #include "ns3/rdma-hw.h"
 #include "ns3/settings.h"
 
+#include "ns3/flow-monitor-helper.h"
+#include "ns3/ipv4-flow-classifier.h"
+
 using namespace ns3;
 using namespace std;
 
@@ -84,7 +87,7 @@ uint32_t packet_payload_size = 1000, l2_chunk_size = 0, l2_ack_interval = 0;
 double pause_time = 5;  // PFC pause, microseconds
 double flowgen_start_time = 2.0, flowgen_stop_time = 2.5, simulator_extra_time = 0.1;
 // queue length monitoring time is not used in this simulator
-// uint32_t qlen_dump_interval = 100000000, qlen_mon_interval = 1000;  // ns
+uint32_t qlen_dump_interval = 100000000, qlen_mon_interval = 10;  // ns uint32_t qlen_dump_interval = 100000000
 uint64_t qlen_mon_start;               // ns
 uint64_t qlen_mon_end;                 // ns
 uint32_t switch_mon_interval = 10000;  // ns
@@ -102,6 +105,8 @@ FILE *voq_output = NULL;
 FILE *voq_detail_output = NULL;
 FILE *uplink_output = NULL;
 FILE *conn_output = NULL;
+FILE *qlen_output = NULL;
+FILE *flowmon_output = NULL;
 
 std::string data_rate, link_delay, topology_file, flow_file;
 std::string flow_input_file = "flow.txt";
@@ -114,6 +119,7 @@ std::string voq_mon_detail_file = "voq_detail.txt";
 std::string uplink_mon_file = "uplink.txt";
 std::string conn_mon_file = "conn.txt";
 std::string est_error_output_file = "est_error.txt";
+std::string flow_mon_file = "flowmon.txt";
 
 // CC params
 double alpha_resume_interval = 55, rp_timer = 300, ewma_gain = 1 / 16;
@@ -191,6 +197,84 @@ struct FlowInput {
 };
 FlowInput flow_input = {0};  // global variable
 uint32_t flow_num;
+
+
+/**
+ * FlowMonitor 统计回调 （输出到 FILE*）
+ */
+// void ReportThroughoutToFile(Ptr<FlowMonitor> monitor, FlowMonitorHelper& fmh, FILE* outFile){
+//     monitor->CheckForLostPackets();
+//     Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(fmh.GetClassifier());
+//     auto stats = monitor->GetFlowStats();
+
+//     // 写一个报告头
+//     fprintf(outFile, "=== FlowMonitor @ %.2f s ===\n", Simulator::Now().GetSeconds());
+//     for (auto &kv : stats) {
+//         FlowId flowId = kv.first;
+//         auto &st = kv.second;
+//         auto t = classifier->FindFlow(flowId);
+//         double duration = (st.timeLastRxPacket - st.timeFirstTxPacket).GetSeconds();
+//         double throughput = st.rxBytes * 8.0 / duration; // bit/s
+
+//         fprintf (outFile,
+//                 "Flow %u src=%u:%u dst=%u:%u txPkt=%u rxPkt=%u lost=%u thr=%.3f Mbps\n",
+//                 flowId,
+//                 Settings::ip_to_node_id(t.sourceAddress),
+//                 t.sourcePort,
+//                 Settings::ip_to_node_id(t.destinationAddress),
+//                 t.destinationPort,
+//                 st.txPackets,
+//                 st.rxPackets,
+//                 st.lostPackets,
+//                 throughput / 1e6);
+//     }
+//     fprintf(outFile, "========================================\n\n");
+//     fflush(outFile);
+
+//     // 如果需要定期输出，再次调度自己：
+//     Simulator::Schedule (MicroSeconds(1), &ReportThroughoutToFile, monitor, fmh, outFile);
+// }
+
+/**
+ * 统计带宽（输出到 FILE*）
+ */
+// 全局：记录每个 node 的上／下行字节数
+std::map<uint32_t,uint64_t> nodeTxBytes, nodeRxBytes;
+std::map<uint32_t, uint64_t> nodeTotalTxBytes, nodeTotalRxBytes;
+
+// 绑定到每个 NetDevice 上的 Tx 回调
+void NodeTx (Ptr<NetDevice> dev, Ptr<const Packet> p) {
+  uint32_t nodeId = dev->GetNode()->GetId();
+  nodeTxBytes[nodeId] += p->GetSize();
+//   nodeTotalTxBytes[nodeId] += p->GetSize();
+}
+
+// 绑定到每个 NetDevice 上的 Rx 回调
+void NodeRx (Ptr<NetDevice> dev, Ptr<const Packet> p) {
+  uint32_t nodeId = dev->GetNode()->GetId();
+  nodeRxBytes[nodeId] += p->GetSize();
+//   nodeTotalRxBytes[nodeId] += p->GetSize();
+}
+
+// 打印带宽函数，interval_ns 和第一次调度请在 main 里设置
+static const uint64_t interval_ns = 1000; // 1μs
+
+void PrintBw(FILE* outFile) {
+  double interval_s = double (interval_ns) * 1e-9;
+  fprintf(outFile, "=== FlowMonitor @ %ld ns ===\n", Simulator::Now().GetNanoSeconds());
+  for (auto &kv : nodeTxBytes) {
+    uint32_t id = kv.first;
+    double txGbps = kv.second * 8.0 / interval_s / 1e9;
+    double rxGbps = nodeRxBytes[id] * 8.0 / interval_s / 1e9;
+    fprintf(outFile, "%d\t\tTx=%.2lf Gbps\t\tRx=%.2lf Gbps\n", id, txGbps, rxGbps);
+    // 重置
+    kv.second = 0;
+    nodeRxBytes[id] = 0;
+  }
+  fprintf(outFile, "\n");
+  // 再次调度
+  Simulator::Schedule (NanoSeconds (interval_ns), &PrintBw, outFile);
+}
 
 /**
  * Read flow input from file "flowf"
@@ -273,7 +357,7 @@ void ScheduleFlowInputs(FILE *infile) {
             pg, serverAddress[src], serverAddress[dst], sport, dport, target_len,
             has_win ? (global_t == 1 ? maxBdp : pairBdp[n.Get(src)][n.Get(dst)]) : 0,
             global_t == 1 ? maxRtt : pairRtt[n.Get(src)][n.Get(dst)]);
-        clientHelper.SetAttribute("StatFlowID", IntegerValue(flow_input.idx)); // 设置了9个变量
+        clientHelper.SetAttribute("StatFlowID", IntegerValue(flow_input.idx)); // 设置了9个变量，进入工厂
 
         ApplicationContainer appCon = clientHelper.Install(n.Get(src));  // SRC
         appCon.Start(Seconds(Time(0)));
@@ -505,7 +589,7 @@ void get_pfc(FILE *fout, Ptr<QbbNetDevice> dev, uint32_t type) {
 }
 
 /*******************************************************************/
-#if (false)
+#if (true) // 之前是false
 
 /**
  * @brief Qlen monitoring at switches (output: qlen.txt), I think "periodically"...
@@ -531,9 +615,14 @@ void monitor_buffer(FILE *qlen_output, NodeContainer *n) {
             if (queue_result.find(i) == queue_result.end()) queue_result[i];
             for (uint32_t j = 1; j < sw->GetNDevices(); j++) {
                 uint32_t size = 0;
-                for (uint32_t k = 0; k < SwitchMmu::qCnt; k++)
-                    size += sw->m_mmu->egress_bytes[j][k];
-                queue_result[i][j].add(size);
+                // for (uint32_t k = 0; k < SwitchMmu::qCnt; k++)
+                //     size += sw->m_mmu->egress_bytes[j][k];
+                size = sw->m_mmu->m_usedEgressPortBytes[j]; // 修改了类的private属性为public
+		        if (size > 0) {
+                    fprintf(qlen_output, " switch node %u, port num is %u, egress_bytes is %u \n time is %lu ", i,j,size, Simulator::Now().GetTimeStep());
+     		    }
+
+                // queue_result[i][j].add(size);
             }
         }
     }
@@ -541,15 +630,19 @@ void monitor_buffer(FILE *qlen_output, NodeContainer *n) {
         fprintf(qlen_output, "time: %lu\n", Simulator::Now().GetTimeStep());
         for (auto &it0 : queue_result) {
             for (auto &it1 : it0.second) {
-                fprintf(qlen_output, "%u %u", it0.first, it1.first);
+                // fprintf(qlen_output, "%u %u", it0.first, it1.first);
+                fprintf(qlen_output, "switch is %u, port is %u", it0.first, it1.first);
                 auto &dist = it1.second.cnt;
-                for (uint32_t i = 0; i < dist.size(); i++) fprintf(qlen_output, " %u", dist[i]);
+                for (uint32_t i = 0; i < dist.size(); i++)   fprintf(qlen_output, "qlen is %u, cnt is %u",i, dist[i]);    // fprintf(qlen_output, " %u", dist[i]);
                 fprintf(qlen_output, "\n");
             }
         }
+        fprintf(qlen_output, "finish one mon interval...\n");
+        fprintf(qlen_output, "flowgen_stop_time is %lf\n", flowgen_stop_time);
+        fprintf(qlen_output, "before flush, time now is : %lu\n", Simulator::Now().GetTimeStep());
         fflush(qlen_output);
     }
-    if (Simulator::Now().GetTimeStep() < qlen_mon_end)
+    if (Simulator::Now().GetTimeStep() < 2500000000)
         Simulator::Schedule(NanoSeconds(qlen_mon_interval), &monitor_buffer, qlen_output, n);
 }
 #endif
@@ -746,6 +839,11 @@ int main(int argc, char *argv[]) {
                 conf >> v;
                 flow_input_file = v;
                 std::cerr << "FLOW_INPUT_FILE\t\t\t" << flow_input_file << "\n";
+            } else if (key.compare("FLOW_MON_FILE") == 0) {
+                std::string v;
+                conf >> v;
+                flow_mon_file = v;
+                std::cerr << "FLOW_MON_FILE\t\t\t" << flow_mon_file << "\n";
             } else if (key.compare("CNP_OUTPUT_FILE") == 0) {
                 std::string v;
                 conf >> v;
@@ -1425,6 +1523,13 @@ int main(int argc, char *argv[]) {
             // create and install RdmaDriver
             Ptr<RdmaDriver> rdma = CreateObject<RdmaDriver>();
             Ptr<Node> node = n.Get(i);
+            
+            for (uint32_t j = 0; j < node->GetNDevices(); ++j) {
+                Ptr<NetDevice> dev = node->GetDevice(j);
+                dev->TraceConnectWithoutContext ("PhyTxEnd",MakeBoundCallback (&NodeTx, dev));
+                dev->TraceConnectWithoutContext ("PhyRxEnd",MakeBoundCallback (&NodeRx, dev));
+            }
+
             rdma->SetNode(node);
             rdma->SetRdmaHw(rdmaHw);
 
@@ -1463,15 +1568,15 @@ int main(int argc, char *argv[]) {
             if (n.Get(j)->GetNodeType() != 0) continue;
             uint64_t delay = pairDelay[n.Get(i)][n.Get(j)];
             uint64_t txDelay = pairTxDelay[n.Get(i)][n.Get(j)];
-            uint64_t rtt = delay * 2 + txDelay;
+            uint64_t rtt = delay * 2 + txDelay; // 传播时延*2 + 传输时延
             uint64_t bw = pairBw[n.Get(i)][n.Get(j)];
-            uint64_t bdp = rtt * bw / 1000000000 / 8;
+            uint64_t bdp = rtt * bw / 1000000000 / 8; // 转换为字节数量
             pairBdp[n.Get(i)][n.Get(j)] = bdp;
             pairBdp[n.Get(j)][n.Get(i)] = bdp;
             pairRtt[n.Get(i)][n.Get(j)] = rtt;
             pairRtt[n.Get(j)][n.Get(i)] = rtt;
 
-            if (bdp > maxBdp) maxBdp = bdp;
+            if (bdp > maxBdp) maxBdp = bdp; // 记录全局最大的BDP
             if (rtt > maxRtt) maxRtt = rtt;
         }
     }
@@ -1736,7 +1841,29 @@ int main(int argc, char *argv[]) {
         Simulator::Schedule(Seconds(0), &ScheduleFlowInputs, flow_input_stream);
     }
 
+    qlen_output = fopen(qlen_mon_file.c_str(), "w"); // 输出流量输入信息
+    Simulator::Schedule(Seconds(flowgen_start_time), &monitor_buffer, qlen_output, &n);
+
     topof.close();
+
+    //
+    // FlowMonitor
+    //
+    // 1. 安装FlowMonitor
+    // FlowMonitorHelper fmh;
+    // Ptr<FlowMonitor> monitor = fmh.Install(n);
+    // flowmon_output = fopen(flow_mon_file.c_str(), "w");
+    // if (!flowmon_output) {
+    //     NS_FATAL_ERROR("Cannot open flowmon.txt for writing");
+    // }
+
+    // // 2. 第一次调度
+    // Simulator::Schedule(Seconds(flowgen_start_time), &ReportThroughoutToFile, monitor, fmh, flowmon_output);
+
+    // 1. 第一次调度
+    flowmon_output = fopen(flow_mon_file.c_str(), "w");
+    Simulator::Schedule(Seconds(flowgen_start_time), &PrintBw, flowmon_output);
+
 
     // schedule link down
     if (link_down_time > 0) {
@@ -1791,6 +1918,22 @@ int main(int argc, char *argv[]) {
                         &stop_simulation_middle);  // check every 100us
     Simulator::Stop(Seconds(flowgen_stop_time + 10.0));
     Simulator::Run();
+
+    // long simTimeS = Simulator::Now().GetNanoSeconds();
+    // fprintf(flowmon_output, "=== Average BW over %ld ns ===\n", simTimeS);
+
+    // for (uint32_t id = 0; id < node_num; ++id) {
+    //     if (nodeTotalTxBytes[id] == 0 && nodeTotalRxBytes[id] == 0) continue;
+    //     double avgTxMbps = nodeTotalTxBytes[id] * 8.0 / simTimeS * 1e3;
+    //     double avgRxMbps = nodeTotalRxBytes[id] * 8.0 / simTimeS * 1e3;
+    //     fprintf(flowmon_output, "Node %d, AvgTx= %.2f Mbps, AvgRx= %.2f Mbps\n", id, avgTxMbps, avgRxMbps);
+    // }
+    // fprintf(flowmon_output, "\n");
+
+    // 再打印一次信息
+    // ReportThroughoutToFile(monitor, fmh, flowmon_output);
+    fclose(flowmon_output);
+    fclose(qlen_output);
 
     /*-----------------------------------------------------------------------------*/
     /*----- we don't need below. Just we can enforce to close this simulation. -----*/

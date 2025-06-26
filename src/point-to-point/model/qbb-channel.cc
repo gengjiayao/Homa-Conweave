@@ -97,11 +97,13 @@ QbbChannel::TransmitStart (
   NS_ASSERT (m_link[0].m_state != INITIALIZING);
   NS_ASSERT (m_link[1].m_state != INITIALIZING);
 
-  uint32_t wire = src == m_link[0].m_src ? 0 : 1;
+  uint32_t wire = src == m_link[0].m_src ? 0 : 1; // 点对点，双向通道
 
+  std::cout << "[QbbChannel::TransmitStart] " << "From " << m_link[wire].m_src->GetNode()->GetId() << " to " << m_link[wire].m_dst->GetNode()->GetId() << std::endl;
+  std::cout << std::endl;
   Simulator::ScheduleWithContext (m_link[wire].m_dst->GetNode ()->GetId (),
                                   txTime + m_delay, &QbbNetDevice::Receive,
-                                  m_link[wire].m_dst, p);
+                                  m_link[wire].m_dst, p); // obj: 指定对象，用这个对象调用Receive
 
   // Call the tx anim callback on the net device
   m_txrxQbb (p, src, m_link[wire].m_dst, txTime, txTime + m_delay);

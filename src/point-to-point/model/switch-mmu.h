@@ -116,7 +116,8 @@ class SwitchMmu : public Object {
     /*------------ ConWeave Objects-------------*/
     ConWeaveRouting m_conweaveRouting;
 
-   private:
+//    private:
+    public:
     bool m_PFCenabled;
 
     uint32_t m_maxBufferBytes{0};

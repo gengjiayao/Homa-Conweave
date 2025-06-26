@@ -161,7 +161,8 @@ void CustomHeader::Serialize (Buffer::Iterator start) const{
 		  // SeqTsHeader
 		  i.WriteHtonU32 (udp.seq);
 		  i.WriteHtonU16 (udp.pg);
-		  i.WriteHtonU32 (udp.test_udp); // todo: for test
+		  i.WriteHtonU32 (udp.homa_flag); // for homa_flag
+		  i.WriteHtonU64(udp.init_grantedBytes); // for init_grantedBytes
 		  udp.ih.Serialize(i);
 	  }else if (l3Prot == 0xFF){ // CNP
 		  i.WriteU8(cnp.qIndex);
@@ -177,6 +178,7 @@ void CustomHeader::Serialize (Buffer::Iterator start) const{
 		  i.WriteU32(ack.seq);
 		  i.WriteU32(ack.irnNack);
 		  i.WriteU16(ack.irnNackSize);
+		  i.WriteU32(ack.homa_grant_bytes); // for homa grant bytes
 		  udp.ih.Serialize(i);
 	  }else if (l3Prot == 0xFE){ // PFC
 		  i.WriteU32 (pfc.time);
@@ -296,7 +298,8 @@ CustomHeader::Deserialize (Buffer::Iterator start)
 		  // SeqTsHeader
 		  udp.seq = i.ReadNtohU32 ();
 		  udp.pg =  i.ReadNtohU16 ();
-		  udp.test_udp = i.ReadNtohU32(); // todo: for test
+		  udp.homa_flag = i.ReadNtohU32(); // for homa_flag
+		  udp.init_grantedBytes = i.ReadNtohU64(); // for init_grantedBytes
 
 		  if (getInt) {
 			udp.ih.Deserialize(i);
@@ -310,7 +313,7 @@ CustomHeader::Deserialize (Buffer::Iterator start)
 		  cnp.qfb = i.ReadU16();
 		  cnp.total = i.ReadU16();
 		  l4Size = 8;
-	  }else if (l3Prot == 0xFC || l3Prot == 0xFD){ // ACK or NACK
+	  }else if (l3Prot == 0xFC || l3Prot == 0xFD || l3Prot == 0xFB){ // ACK or NACK or HOMA
 		  ack.sport = i.ReadU16();
 		  ack.dport = i.ReadU16();
 		  ack.flags = i.ReadU16();
@@ -318,6 +321,7 @@ CustomHeader::Deserialize (Buffer::Iterator start)
 		  ack.seq = i.ReadU32();
 		  ack.irnNack = i.ReadU32();
 		  ack.irnNackSize = i.ReadU16();
+		  ack.homa_grant_bytes = i.ReadU32(); // for homa grant bytes
 		  if (getInt)
 			  ack.ih.Deserialize(i);
 		  l4Size = GetAckSerializedSize();
@@ -337,11 +341,11 @@ uint8_t CustomHeader::GetIpv4EcnBits (void) const{
 }
 
 uint32_t CustomHeader::GetAckSerializedSize(void){
-	return sizeof(ack.sport) + sizeof(ack.dport) + sizeof(ack.flags) + sizeof(ack.pg) + sizeof(ack.seq) + IntHeader::GetStaticSize();
+	return sizeof(ack.sport) + sizeof(ack.dport) + sizeof(ack.flags) + sizeof(ack.pg) + sizeof(ack.seq) + sizeof(ack.homa_grant_bytes) + IntHeader::GetStaticSize();
 }
 
 uint32_t CustomHeader::GetUdpHeaderSize(void){
-	return 8 + sizeof(udp.pg) + sizeof(udp.seq) + sizeof(udp.test_udp) + IntHeader::GetStaticSize(); // todo: for test
+	return 8 + sizeof(udp.pg) + sizeof(udp.seq) + sizeof(udp.homa_flag) + sizeof(udp.init_grantedBytes) + IntHeader::GetStaticSize(); // for homa_flag  for init_grantedBytes
 }
 
 uint32_t CustomHeader::GetStaticWholeHeaderSize(void){

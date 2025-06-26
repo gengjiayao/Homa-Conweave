@@ -6,6 +6,7 @@
 #include <ns3/udp-header.h>
 
 #include <climits>
+#include <cmath>
 
 #include "cn-header.h"
 #include "flow-stat-tag.h"
@@ -159,6 +160,8 @@ void RdmaHw::Setup(QpCompleteCallback cb) {
 uint32_t RdmaHw::GetNicIdxOfQp(Ptr<RdmaQueuePair> qp) {
     auto &v = m_rtTable[qp->dip.Get()];
     if (v.size() > 0) {
+        // std::cout << "[GetNicIdxOfQp] qp->GetHash(): " << qp->GetHash() << std::endl;
+        // std::cout << "[GetNicIdxOfQp] v.size(): " << v.size() << std::endl;
         return v[qp->GetHash() % v.size()];
     }
     NS_ASSERT_MSG(false, "We assume at least one NIC is alive");
@@ -188,6 +191,7 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
     qp->SetSize(size); // size就是传输数据的字节长度
     qp->SetWin(win);
     qp->SetBaseRtt(baseRtt);
+    // std::cout << "[AddQueuePair] baseRtt: " << baseRtt << std::endl;
     qp->SetVarWin(m_var_win);
     qp->SetFlowId(flow_id);
     qp->SetTimeout(m_waitAckTimeout);
@@ -201,7 +205,8 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
 
     // add qp
     uint32_t nic_idx = GetNicIdxOfQp(qp); // 通过哈希选中一个网卡
-    m_nic[nic_idx].qpGrp->AddQp(qp);
+    // std::cout << "[AddQueuePair] sip: " << Settings::ip_to_node_id(qp->sip) << ", dip: " << Settings::ip_to_node_id(qp->dip) << std::endl;
+    m_nic[nic_idx].qpGrp->AddQp(qp); // 添加一个qp
     uint64_t key = GetQpKey(dip.Get(), sport, dport, pg);
     m_qpMap[key] = qp; // qp是一个指针
 
@@ -218,7 +223,15 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
         }
     } else if (m_cc_mode == 7) {
         qp->tmly.m_curRate = m_bps;
-    } 
+    } else if (m_cc_mode == 9) {
+        qp->homa.m_curRate = m_bps;
+        qp->homa.m_enabled = true; // 设定homa拥塞控制
+        
+        // 先不考虑帧间隔时间
+        // qp->homa.m_init_grantedBytes = static_cast<unsigned long>((static_cast<double>(m_bps.GetBitRate()) / 8)) * (qp->m_baseRtt * 1e-9);
+        qp->homa.m_init_grantedBytes = 50000;
+        qp->homa.m_grantedBytes = qp->homa.m_init_grantedBytes < size ? qp->homa.m_init_grantedBytes : size; // 设定当前已授权的字节数
+    }
     
     // Notify Nic
     m_nic[nic_idx].dev->NewQp(qp); // 真正通知网卡设备，添加QP
@@ -289,6 +302,142 @@ void RdmaHw::DeleteRxQp(uint32_t dip, uint16_t dport, uint16_t sport, uint16_t p
     m_rxQpMap.erase(key);
 }
 
+void RdmaHw::SendHomaPkt() {
+    FlowState grant_flow = request_queue.top();
+    request_queue.pop();
+
+    uint64_t flow_hash = get_flow_id(grant_flow.dst_ip, grant_flow.src_ip); // 此时ip反过来了
+
+    Ptr<RdmaRxQueuePair> rxQp = GetRxQp(grant_flow.src_ip, grant_flow.dst_ip, grant_flow.sport, grant_flow.dport, grant_flow.priority, false);
+
+    qbbHeader seqh;
+    seqh.SetPG(grant_flow.priority);
+    seqh.SetSport(grant_flow.sport);
+    seqh.SetDport(grant_flow.dport);
+
+    /********************************
+     * 一个homa授权包发送延迟为 4.8 ns
+     * 100Gbps -> 12.5 Byte / 1.0 ns -> 1000 Byte / 80.0 ns -> 10000Byte / 800 ns -> (12000 Byte / 1000ns)
+     ********************************/
+    uint32_t grant_bytes = 12000;
+    seqh.SetHomaGrantedBytes(grant_bytes); // 设定授权数量
+    
+    grant_flow.last_send_time = Simulator::Now(); // 更新发送时间？这个时间需要核实
+    if (grant_bytes <= grant_flow.remaining_bytes) {
+        grant_flow.remaining_bytes -= grant_bytes;
+        request_queue.push(grant_flow); // 还有未授权的，就继续入队
+    } else {
+        grant_flow.remaining_bytes = 0;
+        request_queue_hash.erase(flow_hash); // 全部数据授权完毕，不需要留在请求队列中了
+    }
+
+    Ptr<Packet> newp = Create<Packet>(std::max(60 - 14 - 20 - (int)seqh.GetSerializedSize(), 0));
+    newp->AddHeader(seqh);
+
+    Ipv4Header head;
+    head.SetDestination(Ipv4Address(grant_flow.dst_ip));
+    head.SetSource(Ipv4Address(grant_flow.src_ip));
+    head.SetProtocol(0xFB);  // homa=0xFB
+    head.SetTtl(64);
+    head.SetPayloadSize(newp->GetSize());
+    newp->AddHeader(head);
+
+    AddHeader(newp, 0x800);  // Attach PPP header
+
+    // send
+    uint32_t nic_idx = GetNicIdxOfRxQp(rxQp);
+    m_nic[nic_idx].dev->RdmaEnqueueHighPrioQ(newp); // 当前的homa授权包等级与ACK一致
+    m_nic[nic_idx].dev->TriggerTransmit();
+        
+    // 授权请求队列空了，Homa逻辑停止
+    if (request_queue.empty()) {
+        homa_is_running = false;
+    } else {
+        // 隔一段时间再次调用当前函数
+        Ptr<PointToPointNetDevice> baseDev = DynamicCast<PointToPointNetDevice>(m_nic[nic_idx].dev);
+        DataRate rate = baseDev->GetDataRate();
+        // todo: 需要计算一个合理的值
+        // Time next_grant_time = Seconds(rate.CalculateTxTime(newp->GetSize()));
+        Time next_grant_time("1000ns"); // todo：实际带宽？
+        printf("[RdmaHw::SendHomaPkt] time = %.16lf\n", next_grant_time.GetSeconds());
+        Simulator::Schedule(next_grant_time, &RdmaHw::SendHomaPkt, this);
+    }
+}
+
+void RdmaHw::HandleUdpHoma(Ptr<Packet> p, CustomHeader &ch) {
+    // 1. 是homa，未启动homa：启动homa逻辑，初始化流返回ack，并立即返回grant包。
+    // 2. 是homa，已启动homa：正常返回ack，这个流是否已经被掌握，没被掌握就添加流到请求队列。
+    // 3. 不是homa，正常返回ack。
+
+    std::cout << "[RdmaHw::HandleUdpHoma] " << "homa is " << (homa_is_running ? "running" : "not running") << std::endl;
+
+    uint64_t flow_hash = get_flow_id(ch.sip, ch.dip);
+    if (request_queue_hash.find(flow_hash) != request_queue_hash.end()) {
+        // 找到了，已经被homa掌握了，直接返回即可
+        return;
+    }
+
+    uint32_t size;
+    FlowIDNUMTag fit;
+    if (p->PeekPacketTag(fit)) {
+        size = fit.GetFlowSize();
+        std::cout << "[RdmaHw::HandleUdpHoma] " << "FlowSize: " << fit.GetFlowSize() << std::endl;
+    }
+
+    FlowState cur_flow;
+    cur_flow.sport = ch.udp.dport; // PS: 这里已经反过来了
+    cur_flow.dport = ch.udp.sport; // PS: 这里已经反过来了
+    cur_flow.src_ip = ch.dip; // PS: 这里已经反过来了
+    cur_flow.dst_ip = ch.sip; // PS: 这里已经反过来了
+    cur_flow.priority = ch.udp.pg;
+    cur_flow.remaining_bytes = size >= ch.udp.init_grantedBytes ? size - ch.udp.init_grantedBytes : 0;
+    cur_flow.last_send_time = Simulator::Now();
+
+    std::cout << "[RdmaHw::HandleUdpHoma] " << "src_ip: " << Settings::ip_to_node_id(Ipv4Address(cur_flow.src_ip)) << std::endl;
+    std::cout << "[RdmaHw::HandleUdpHoma] " << "dst_ip: " << Settings::ip_to_node_id(Ipv4Address(cur_flow.dst_ip)) << std::endl;
+    std::cout << "[RdmaHw::HandleUdpHoma] " << "priority: " << cur_flow.priority << std::endl;
+    std::cout << "[RdmaHw::HandleUdpHoma] " << "remaining_bytes: " << cur_flow.remaining_bytes << std::endl;
+    std::cout << "[RdmaHw::HandleUdpHoma] " << "last_send_time: " << cur_flow.last_send_time << std::endl;
+    std::cout << "[RdmaHw::HandleUdpHoma] " << "init_grantedBytes: " << ch.udp.init_grantedBytes << std::endl;
+
+    if (cur_flow.remaining_bytes != 0) {
+        request_queue.push(cur_flow); // 入队
+        request_queue_hash[flow_hash] = cur_flow; // 记录进哈希表中
+    }
+    std::cout << "[RdmaHw::HandleUdpHoma] " << "request_queue.size: " << request_queue.size() << std::endl;
+
+    if (!request_queue.size()) return; // 如果在RTT满带宽内就完成全部数据发送了，就不用授权了
+
+    if (!this->homa_is_running) {
+        this->homa_is_running = true;
+        SendHomaPkt();
+    }
+}
+
+int RdmaHw::ReceiveHoma(Ptr<Packet> p, CustomHeader &ch) {
+    // 找到接收Homa数据包的qp
+    uint16_t qIndex = ch.ack.pg;
+    uint16_t port = ch.ack.dport;
+    uint16_t sport = ch.ack.sport;
+    uint64_t key = GetQpKey(ch.sip, port, sport, qIndex);
+    Ptr<RdmaQueuePair> qp = GetQp(key);
+
+    uint32_t grant_bytes = ch.ack.homa_grant_bytes;
+    std::cout << "[RdmaHw::ReceiveHoma] " << "grant_bytes: " << grant_bytes << std::endl;
+
+    std::cout << "[RdmaHw::ReceiveHoma] " << "before update m_grantedBytes: " << qp->homa.m_grantedBytes << std::endl;
+    qp->homa.m_grantedBytes += grant_bytes;
+    std::cout << "[RdmaHw::ReceiveHoma] " << "after update m_grantedBytes: " << qp->homa.m_grantedBytes << std::endl;
+
+    // 找到qp对应的设备节点
+    uint32_t nic_idx = GetNicIdxOfQp(qp);
+    Ptr<QbbNetDevice> dev = m_nic[nic_idx].dev;
+
+    // 被授权之后就可以继续发送了
+    dev->TriggerTransmit();
+    return 0;
+}
+
 int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
     uint8_t ecnbits = ch.GetIpv4EcnBits();
 
@@ -327,16 +476,6 @@ int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
     bool cnp_check = false;
     int x = ReceiverCheckSeq(ch.udp.seq, rxQp, payload_size, cnp_check);
 
-    if (ch.l3Prot == 0x11) {
-        printf("===========NIC receive===========\n");
-        printf("sip: %x, dip: %x, seq: %d, test_udp: %x\n", ch.sip, ch.dip, ch.udp.seq, ch.udp.test_udp);
-        printf("nHop: %d\n", ch.udp.ih.nhop);
-        for (int i = 0; i < 5; i++) {
-            printf("[%d]: lineRate: %d, bytes: %d, time = %d, qlen: %d\n", i + 1, ch.udp.ih.hop[i].lineRate, ch.udp.ih.hop[i].bytes, ch.udp.ih.hop[i].time, ch.udp.ih.hop[i].qlen);
-        }
-        printf("\n");
-    }
-
     if (x == 1 || x == 2 || x == 6) {  // generate ACK or NACK
         qbbHeader seqh;
         seqh.SetSeq(rxQp->ReceiverNextExpectedSeq);
@@ -361,6 +500,12 @@ int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
             if (ecnbits) cnp_by_ecn++;
             if (cnp_check) cnp_by_ooo++;
             seqh.SetCnp();
+        }
+
+        // ack包的“调试”标记
+        if (ch.udp.homa_flag) {
+            // 理论上这个位置不应该生成授权包数量，这个函数就是ack的逻辑，1234作为调试标记
+            seqh.SetHomaGrantedBytes(1234);
         }
 
         Ptr<Packet> newp =
@@ -388,7 +533,12 @@ int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
         // send
         uint32_t nic_idx = GetNicIdxOfRxQp(rxQp);
         m_nic[nic_idx].dev->RdmaEnqueueHighPrioQ(newp);
+        std::cout << "[RdmaHw::ReceiveUdp] " << "产生 ACK 包并发送" << std::endl;
         m_nic[nic_idx].dev->TriggerTransmit();
+    }
+
+    if (ch.udp.homa_flag) {
+        HandleUdpHoma(p, ch);
     }
     return 0;
 }
@@ -483,6 +633,7 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch) {
             uint32_t goback_seq = seq / m_chunk * m_chunk;
             qp->Acknowledge(goback_seq);
         }
+        // std::cout << "[ReceiveAck] qp->irn.m_enabled: " << qp->irn.m_enabled << std::endl; 
         if (qp->irn.m_enabled) {
             // handle NACK
             NS_ASSERT(ch.l3Prot == 0xFD);
@@ -512,6 +663,8 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch) {
                 qp->irn.m_recovery = false;
             }
         } else {
+            std::cout << "[ReceiveAck] qp->snd_nxt: " << qp->snd_nxt << std::endl;
+            std::cout << "[ReceiveAck] qp->snd_una: " << qp->snd_nxt << std::endl;
             if (qp->snd_nxt < qp->snd_una) {
                 qp->snd_nxt = qp->snd_una;
             }
@@ -593,6 +746,9 @@ int RdmaHw::Receive(Ptr<Packet> p, CustomHeader &ch) {
         return ReceiveAck(p, ch);
     } else if (ch.l3Prot == 0xFC) {  // ACK
         return ReceiveAck(p, ch);
+    } else if (ch.l3Prot == 0xFB) {  // Homa
+        std::cout << "[RdmaHw::Receive] " << "ReveiveHomaGrantPkt!" << std::endl;
+        return ReceiveHoma(p, ch);
     }
     return 0;
 }
@@ -763,10 +919,15 @@ void RdmaHw::RedistributeQp() {
 }
 
 Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
-    uint32_t payload_size = qp->GetBytesLeft();
+    // 以 homa 的授权数据量为准
+    uint32_t payload_size = qp->homa.m_enabled ? qp->homa.m_grantedBytes : qp->GetBytesLeft();
+
     if (m_mtu < payload_size) {  // possibly last packet
         payload_size = m_mtu;
     }
+
+    // std::cout << "[RdmaHw::GetNxtPacket] payload_size: " << payload_size << std::endl;
+
     uint32_t seq = (uint32_t)qp->snd_nxt;
     bool proceed_snd_nxt = true;
     qp->stat.txTotalPkts += 1;
@@ -778,8 +939,21 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
     seqTs.SetSeq(seq);
     seqTs.SetPG(qp->m_pg);
 
-    uint32_t test_udp = 0xFFFFFFF0;
-    seqTs.SetTestUDP(test_udp); // todo: for test
+    // 设置homa标签
+    uint32_t homa_flag = 0;
+    if (qp->homa.m_enabled && !homa_is_request) {
+        // 如果当前流没有请求过
+        homa_flag = 1;
+        homa_is_request = true;
+    }
+    
+    if (homa_flag == 1) {
+        std::cout << "[RdmaHw::GetNxtPacket] " << "Set Homa request!" << std::endl;
+    }
+    
+    seqTs.SetHomaFlag(homa_flag); // for homa_flag
+    seqTs.SetInitGrantedBytes(qp->homa.m_init_grantedBytes); // for init_grantedBytes
+
     p->AddHeader(seqTs);
     // add udp header
     UdpHeader udpHeader;
@@ -792,6 +966,7 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
     ipHeader.SetDestination(qp->dip);
     ipHeader.SetProtocol(0x11);
     ipHeader.SetPayloadSize(p->GetSize());
+    // std::cout << "[RdmaHw::GetNxtPacket] " << "p->GetSize(): " << p->GetSize() << std::endl; // 这里总是差18个字节，很恐怖?!
     ipHeader.SetTtl(64);
     ipHeader.SetTos(0);
     ipHeader.SetIdentification(qp->m_ipid);
@@ -801,17 +976,8 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
     ppp.SetProtocol(0x0021);  // EtherToPpp(0x800), see point-to-point-net-device.cc
     p->AddHeader(ppp);
 
-    // todo: for test
-    // 1. find grep
-    // 2. 1 byte
-    // 3. print
-    printf("===========rdma-hw create===========\n");
-    printf("sip: %x, dip: %x, size: %d, seq: %d, test_udp: %x\n", qp->sip, qp->dip, payload_size, seq, test_udp);
-    printf("nHop: %d\n", seqTs.ih.nhop);
-    for (int i = 0; i < 5; i++) {
-        printf("[%d]: lineRate: %d, bytes: %d, time = %d, qlen: %d\n", i + 1, seqTs.ih.hop[i].lineRate, seqTs.ih.hop[i].bytes, seqTs.ih.hop[i].time, seqTs.ih.hop[i].qlen);
-    }
-    printf("\n");
+    // 当前qp总共需要发送的字节数量，以及payload_size
+    std::cout << "[RdmaHw::GetNxtPacket] " << "当前QP总大小: " << qp->m_size << ", payload_size: " << payload_size << std::endl;
 
     // attach Stat Tag
     uint8_t packet_pos = UINT8_MAX;
@@ -845,7 +1011,10 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
     }
 
     // // update state
-    if (proceed_snd_nxt) qp->snd_nxt += payload_size;
+    if (proceed_snd_nxt) {
+        qp->snd_nxt += payload_size;
+        qp->homa.m_grantedBytes -= payload_size;
+    }
 
     qp->m_ipid++;
 
@@ -913,7 +1082,7 @@ void RdmaHw::ChangeRate(Ptr<RdmaQueuePair> qp, DataRate new_rate) {
 #if 1
     Time sendingTime = Seconds(qp->m_rate.CalculateTxTime(qp->lastPktSize));
     Time new_sendintTime = Seconds(new_rate.CalculateTxTime(qp->lastPktSize));
-    qp->m_nextAvail = qp->m_nextAvail + new_sendintTime - sendingTime;
+    qp->m_nextAvail = qp->m_nextAvail + new_sendintTime - sendingTime; // 做时间补偿，更新下一次可用时间
     // update nic's next avail event
     uint32_t nic_idx = GetNicIdxOfQp(qp);
     m_nic[nic_idx].dev->UpdateNextAvail(qp->m_nextAvail);
@@ -921,6 +1090,13 @@ void RdmaHw::ChangeRate(Ptr<RdmaQueuePair> qp, DataRate new_rate) {
 
     // change to new rate
     qp->m_rate = new_rate;
+}
+
+/**********************
+ * Homa
+ *********************/
+uint64_t RdmaHw::get_flow_id (uint32_t src, uint32_t dst) {
+    return (static_cast<uint64_t>(src) << 32) | dst;
 }
 
 #define PRINT_LOG 0

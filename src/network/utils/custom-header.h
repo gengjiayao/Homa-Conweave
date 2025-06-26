@@ -107,7 +107,8 @@ public:
 		  // SeqTsHeader
 		  uint16_t pg;
 		  uint32_t seq;
-      uint32_t test_udp; // todo: for test
+      uint32_t homa_flag; // for homa_flag
+      uint64_t init_grantedBytes; // for init_grantedBytes
 		  IntHeader ih;
 	  } udp;
 	  // CnHeader
@@ -127,6 +128,7 @@ public:
 		  IntHeader ih;
 		  uint32_t irnNack;
 		  uint16_t irnNackSize;
+      uint32_t homa_grant_bytes; // for homa grant bytes
 	  } ack;
 	  // PauseHeader
 	  struct {

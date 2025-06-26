@@ -70,18 +70,32 @@ SeqTsHeader::GetTs (void) const
 	return TimeStep (ih.ts);
 }
 
-// todo: for test
+// for homa_flag set
 void
-SeqTsHeader::SetTestUDP (uint32_t test_udp)
+SeqTsHeader::SetHomaFlag (uint32_t homa_flag)
 {
-  m_test_udp = test_udp;
+  m_homa_flag = homa_flag;
 } 
 
-// todo: for test
+// for homa_flag get
 uint32_t
-SeqTsHeader::GetTestUDP (void) const
+SeqTsHeader::GetHomaFlag (void) const
 {
-  return m_test_udp;
+  return m_homa_flag;
+}
+
+// for init_grantedBytes set
+void
+SeqTsHeader::SetInitGrantedBytes (uint64_t init_grantedBytes)
+{
+  m_init_grantedBytes = init_grantedBytes;
+} 
+
+// for init_grantedBytes get
+uint64_t
+SeqTsHeader::GetInitGrantedBytes (void) const
+{
+  return m_init_grantedBytes;
 }
 
 TypeId
@@ -111,7 +125,7 @@ SeqTsHeader::GetSerializedSize (void) const
 	return GetHeaderSize();
 }
 uint32_t SeqTsHeader::GetHeaderSize(void){
-	return 6 + IntHeader::GetStaticSize() + 4; // todo: for test test_udp 添加test的2个字节数
+	return 6 + IntHeader::GetStaticSize() + 4 + 8; // 4: for homa_flag (uint32_t) 8: for init_grantedBytes (uint64_t)
 }
 
 void
@@ -121,8 +135,11 @@ SeqTsHeader::Serialize (Buffer::Iterator start) const
   i.WriteHtonU32 (m_seq);
   i.WriteHtonU16 (m_pg);
 
-  // write test
-  i.WriteHtonU32(m_test_udp); // todo: for test
+  // for homa_flag write
+  i.WriteHtonU32(m_homa_flag);
+
+  // for init_grantedBytes write
+  i.WriteHtonU64(m_init_grantedBytes);
 
   // write IntHeader
   ih.Serialize(i);
@@ -134,8 +151,11 @@ SeqTsHeader::Deserialize (Buffer::Iterator start)
   m_seq = i.ReadNtohU32 ();
   m_pg =  i.ReadNtohU16 ();
 
-  // read test_udp
-  m_test_udp = i.ReadNtohU32(); // todo: for test
+  // for homa_flag read
+  m_homa_flag = i.ReadNtohU32();
+
+  // for init_grantedBytes read
+  m_init_grantedBytes = i.ReadNtohU64();
 
   // read IntHeader
   ih.Deserialize(i);

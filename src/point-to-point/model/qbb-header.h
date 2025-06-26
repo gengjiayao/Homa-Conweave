@@ -43,6 +43,7 @@ public:
   void SetIntHeader(const IntHeader &_ih);
   void SetIrnNack(uint32_t seq);
   void SetIrnNackSize(size_t sz);
+  void SetHomaGrantedBytes(uint32_t grant_bytes);
 
 //Getters
   /**
@@ -57,6 +58,7 @@ public:
   uint8_t GetCnp() const;
   uint32_t GetIrnNack() const;
   size_t GetIrnNackSize() const;
+  uint32_t GetHomaGrantBytes() const;
 
   static TypeId GetTypeId (void);
   virtual TypeId GetInstanceTypeId (void) const;
@@ -75,6 +77,7 @@ private:
   uint32_t m_irn_nack;
   uint16_t m_irn_nack_size;
   bool enable_irn;
+  uint32_t homa_grant_bytes; // for homa_protocol
 };
 
 }; // namespace ns3

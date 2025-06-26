@@ -54,8 +54,11 @@ public:
   void SetPG (uint16_t pg);
   uint16_t GetPG () const;
 
-  void SetTestUDP (uint32_t test_udp); // todo: for test
-  uint32_t GetTestUDP () const; // todo: for test
+  void SetHomaFlag (uint32_t homa_flag); // for homa_flag
+  uint32_t GetHomaFlag () const; // for homa_flag
+
+  void SetInitGrantedBytes(uint64_t init_grantedBytes); // for init_grantedBytes
+  uint64_t GetInitGrantedBytes() const; // for init_grantedBytes
 
   static TypeId GetTypeId (void);
   virtual TypeId GetInstanceTypeId (void) const;
@@ -68,7 +71,8 @@ private:
 
   uint32_t m_seq;
   uint16_t m_pg;
-  uint32_t m_test_udp; // todo: for test
+  uint32_t m_homa_flag; // for homa_flag
+  uint64_t m_init_grantedBytes; // for init_grantedBytes
 public:
   IntHeader ih;
 };

@@ -22,6 +22,21 @@ struct RdmaInterfaceMgr {
     RdmaInterfaceMgr(Ptr<QbbNetDevice> _dev) { dev = _dev; }
 };
 
+struct FlowState {
+    uint16_t sport;
+    uint16_t dport;
+    uint16_t priority;
+    uint32_t src_ip;
+    uint32_t dst_ip;
+    uint32_t remaining_bytes;
+    Time last_send_time;
+    
+    bool operator < (const FlowState& other) const {
+        return (priority != other.priority) ? 
+               (priority < other.priority) : (remaining_bytes > other.remaining_bytes);
+    }
+};
+
 class RdmaHw : public Object {
    public:
     static TypeId GetTypeId(void);
@@ -111,6 +126,21 @@ class RdmaHw : public Object {
     uint32_t cnp_by_ooo;
     uint32_t cnp_total;
     size_t getIrnBufferOverhead();  // get buffer overhead for IRN
+
+    /**********************
+     * Homa
+     *********************/
+    bool homa_is_running = false; // 当前rdmahw的homa逻辑是否启用
+    bool homa_is_request = false; // 当前流是否已经请求过homa调度
+    std::priority_queue<FlowState> request_queue; // 根据流做优先队列
+    std::unordered_map<uint64_t, FlowState> request_queue_hash; // 哈希表记录哪些qp已经入队
+    uint64_t get_flow_id (uint32_t src, uint32_t dst);
+    
+    void HandleUdpHoma(Ptr<Packet> p, CustomHeader &ch);
+    void SendHomaPkt();
+
+    int ReceiveHoma(Ptr<Packet> p, CustomHeader &ch);
+    void HandleAckHoma(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch);
 
     /******************************
      * Mellanox's version of DCQCN
