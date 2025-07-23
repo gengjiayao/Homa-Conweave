@@ -366,7 +366,7 @@ void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Pack
             IntHeader *ih = (IntHeader *)&buf[PppHeader::GetStaticSize() + 20 + 8 +
                                               6 + 4 + 8];  // ppp, ip(20), udp(8), SeqTs(6), homa_flag(4), init_grantedBytes(8), INT
             Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(m_devices[ifIndex]);
-            if (m_ccMode == 3) {  // HPCC
+            if (m_ccMode == 3 || m_ccMode == 10) {  // HPCC
                 ih->PushHop(Simulator::Now().GetTimeStep(), m_txBytes[ifIndex],
                             dev->GetQueue()->GetNBytesTotal(), dev->GetDataRate().GetBitRate());
             }

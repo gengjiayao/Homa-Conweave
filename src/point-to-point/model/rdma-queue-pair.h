@@ -74,6 +74,7 @@ class RdmaQueuePair : public Object {
      * runtime states
      *****************************/
     DataRate m_rate;  //< Current rate
+    uint64_t restSendSize;
     
     struct {
         bool m_enabled{false};
@@ -105,6 +106,11 @@ class RdmaQueuePair : public Object {
             DataRate Rc;
             uint32_t incStage;
         } hopState[IntHeader::maxHop];
+        DataRate m_grantRate; // 保存更新的HPCC-Rate
+        uint64_t m_grantedBytes; // HPCC令牌桶
+        uint64_t m_restGrantBytes; // HPCC剩余未授权令牌数
+        bool m_grantDone; // 检测是否还在进行间歇性授权
+        bool m_homa_hpcc;
     } hp;
     struct {
         uint32_t m_lastUpdateSeq;

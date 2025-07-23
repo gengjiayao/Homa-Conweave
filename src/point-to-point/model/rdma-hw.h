@@ -193,6 +193,7 @@ class RdmaHw : public Object {
     void UpdateRateHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch, bool fast_react);
     void UpdateRateHpTest(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch, bool fast_react);
     void FastReactHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch);
+    void UpdateGrantBytesHp(Ptr<RdmaQueuePair> qp); // 用于更新HPCC令牌桶数量
 
     /**********************
      * TIMELY

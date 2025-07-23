@@ -257,7 +257,7 @@ void NodeRx (Ptr<NetDevice> dev, Ptr<const Packet> p) {
 }
 
 // 打印带宽函数，interval_ns 和第一次调度请在 main 里设置
-static const uint64_t interval_ns = 1000; // 1μs
+static const uint64_t interval_ns = 10000; // 100ns
 
 void PrintBw(FILE* outFile) {
   double interval_s = double (interval_ns) * 1e-9;
@@ -1229,7 +1229,7 @@ int main(int argc, char *argv[]) {
     // IntHeader::mode
     if (cc_mode == 7)  // timely, use ts
         IntHeader::mode = 1;
-    else if (cc_mode == 3)  // hpcc, use int
+    else if (cc_mode == 3 || cc_mode == 10)  // hpcc, use int
         IntHeader::mode = 0;
     else  // others, no extra header
         IntHeader::mode = 5;
@@ -1463,6 +1463,7 @@ int main(int argc, char *argv[]) {
     // manually type BDP
     std::map<std::string, uint32_t> topo2bdpMap;
     topo2bdpMap[std::string("leaf_spine_128_100G_OS2")] = 104000;  // RTT=8320
+    // topo2bdpMap[std::string("leaf_spine_128_100G_OS2")] = 78000;
     topo2bdpMap[std::string("fat_k8_100G_OS2")] = 156000;      // RTT=12480 --> all 100G links
 
     // topology_file
