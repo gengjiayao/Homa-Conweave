@@ -5,12 +5,11 @@ build/*
 .vscode/*
 .cache
 analyze/raw_basic/*
-mix/output/*
 mix/*_flow.txt
 config/*_flow.txt
 analysis/figures/*.pdf
 **/*.pyc
 .vscode
 __pycache__
-mix/.history
+mix/*
 my_pic/*
