@@ -303,11 +303,15 @@ def main():
     # By default, DCQCN uses no window (rate-based).
     has_win = 0
     var_win = 0
-    if (cc_mode == 3 or cc_mode == 8 or enforce_win == 1 or cc_mode == 10):  # HPCC or DCTCP or enforcement
+    if (cc_mode == 3 or cc_mode == 8 or enforce_win == 1):  # HPCC or DCTCP or enforcement
         has_win = 1
         var_win = 1
         if enforce_win == 1:
             print("### INFO: Enforced to use window scheme! ###")
+    
+    if (cc_mode == 10):
+        has_win = 1
+        var_win = 1
 
     # record to history
     simulday = datetime.now().strftime("%m/%d/%y")

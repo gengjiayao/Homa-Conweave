@@ -89,7 +89,7 @@ def draw_bandwidth(data_pairs, labels, colors=None):
 
     plt.style.use('seaborn-v0_8-whitegrid')
     for i, (x, y) in enumerate(data_pairs):
-        plt.plot(x, y, label=labels[i], color=colors[i], linewidth=2.5, alpha=0.8)
+        plt.plot(x, y, label=labels[i], color=colors[i], linewidth=1, alpha=0.8)
 
     plt.title("Bandwidth Comparison", fontsize=16, fontweight='bold')
     plt.xlabel("Time (ms)", fontsize=14)
@@ -223,7 +223,7 @@ def draw_hprate(time, hpcc_u, hpcc_rate, batch_size):
     hpcc_rate_batch = batch_mean(hpcc_rate, batch_size) 
 
     fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, figsize=(10, 8))
-    fig.suptitle('hpcc_u sv hpcc_rate', fontsize=16, fontweight='bold')
+    fig.suptitle('hpcc_u vs hpcc_rate', fontsize=16, fontweight='bold')
 
     ax1.plot(time_batch, hpcc_u_batch, color='blue', label='hpcc_u')
     ax1.set_xlabel('Time (ms)')
@@ -280,7 +280,7 @@ def draw_grantbytes(time, hpcc_gBytes, homa_gBytes, batch_size):
 #                 main
 # =======================================
 
-BANDWIDTH_BATCH_SIZE = 1
+BANDWIDTH_BATCH_SIZE = 100
 QLEN_BATCH_SIZE = 10
 
 def main():

@@ -257,7 +257,7 @@ void NodeRx (Ptr<NetDevice> dev, Ptr<const Packet> p) {
 }
 
 // 打印带宽函数，interval_ns 和第一次调度请在 main 里设置
-static const uint64_t interval_ns = 10000; // 100ns
+static const uint64_t interval_ns = 100; // 100ns
 
 void PrintBw(FILE* outFile) {
   double interval_s = double (interval_ns) * 1e-9;

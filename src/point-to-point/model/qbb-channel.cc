@@ -98,10 +98,21 @@ QbbChannel::TransmitStart (
   NS_ASSERT (m_link[1].m_state != INITIALIZING);
 
   uint32_t wire = src == m_link[0].m_src ? 0 : 1; // 点对点，双向通道
-#if (MY_DEBUG == true)
-  std::cout << "[QbbChannel::TransmitStart] " << "From " << m_link[wire].m_src->GetNode()->GetId() << " to " << m_link[wire].m_dst->GetNode()->GetId() << std::endl;
-  std::cout << std::endl;
-#endif
+  
+  CustomHeader ch(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
+  p->PeekHeader(ch);
+  std::string ss;
+  if (ch.l3Prot == 0x11) ss = "UDP";
+  else if (ch.l3Prot == 0xFC) ss = "ACK";
+  else if (ch.l3Prot == 0xFB) ss = "HOMA";
+  else if (ch.l3Prot == 0xFE) ss = "PFC";
+  std::cout << "[Trans]" << " "
+            << "time: " << Simulator::Now().GetNanoSeconds() << " "
+            << "From" << "-" <<  m_link[wire].m_src->GetNode()->GetId() << "-"
+            << "to" << "-" << m_link[wire].m_dst->GetNode()->GetId() << " " 
+            << ss << " "
+            << std::endl;
+
   Simulator::ScheduleWithContext (m_link[wire].m_dst->GetNode ()->GetId (),
                                   txTime + m_delay, &QbbNetDevice::Receive,
                                   m_link[wire].m_dst, p); // obj: 指定对象，用这个对象调用Receive
