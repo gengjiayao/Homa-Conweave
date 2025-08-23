@@ -14,8 +14,12 @@
 #include "ns3/data-rate.h"
 #include "ns3/double.h"
 #include "ns3/flow-id-num-tag.h"
+#include "ns3/ipv4-address.h"
+#include "ns3/packet.h"
 #include "ns3/pointer.h"
 #include "ns3/ppp-header.h"
+#include "ns3/ptr.h"
+#include "ns3/rdma-queue-pair.h"
 #include "ns3/settings.h"
 #include "ns3/switch-node.h"
 #include "ns3/uinteger.h"
@@ -328,6 +332,107 @@ void RdmaHw::DeleteRxQp(uint32_t dip, uint16_t dport, uint16_t sport, uint16_t p
     m_rxQpMap.erase(key);
 }
 
+void RdmaHw::SendHomaPktFair() {
+    uint32_t nic_idx = 0;
+    bool flow_was_processed = false;
+
+    auto homa_call_back = [&](FlowState& flow) {
+        // 回调函数;
+        const int grant_bytes = 12000;
+        Ptr<RdmaRxQueuePair> rxQp = GetRxQp(flow.src_ip, flow.dst_ip, flow.sport, flow.dport, flow.priority, false);
+        qbbHeader seqh;
+        seqh.SetPG(flow.priority);
+        seqh.SetSport(flow.sport);
+        seqh.SetDport(flow.dport);
+        flow.last_send_time = Simulator::Now();
+
+        if (grant_bytes <= flow.remaining_bytes) {
+            seqh.SetHomaGrantedBytes(grant_bytes);
+            flow.remaining_bytes -= grant_bytes;
+        } else {
+            seqh.SetHomaGrantedBytes(flow.remaining_bytes);
+            flow.remaining_bytes = 0;
+        }
+
+        Ptr<Packet> newp = Create<Packet>(std::max(60 - 14 - 20 - (int)seqh.GetSerializedSize(), 0));
+        newp->AddHeader(seqh);
+
+        Ipv4Header head;
+        head.SetDestination(Ipv4Address(flow.dst_ip));
+        head.SetSource(Ipv4Address(flow.src_ip));
+        head.SetProtocol(0xFB);  // homa=0xFB
+        head.SetTtl(64);
+        head.SetPayloadSize(newp->GetSize());
+        newp->AddHeader(head);
+
+        AddHeader(newp, 0x800);  // Attach PPP header
+
+        // send
+        nic_idx = GetNicIdxOfRxQp(rxQp);
+        m_nic[nic_idx].dev->RdmaEnqueueHighPrioQ(newp); // 当前的homa授权包等级与ACK一致
+        m_nic[nic_idx].dev->TriggerTransmit();
+
+        flow_was_processed = true;
+    };
+
+    homa_scheduler.dispatch(homa_call_back);
+
+    if (!flow_was_processed) {
+        this->homa_is_running = false;
+        return;
+    }
+
+    if (homa_scheduler.has_flows()) {
+        Ptr<PointToPointNetDevice> baseDev = DynamicCast<PointToPointNetDevice>(m_nic[nic_idx].dev);
+        DataRate rate = baseDev->GetDataRate();
+        Time next_grant_time("1000ns");
+        Simulator::Schedule(next_grant_time, &RdmaHw::SendHomaPktFair, this);
+    } else {
+        this->homa_is_running = false;
+    }
+}
+
+void RdmaHw::HandleUdpHomaFair(Ptr<Packet> p, CustomHeader &ch) {
+    // 设置调度器公平调度阈值
+    homa_scheduler.set_flow_threshold(2000);
+
+    uint32_t size;
+    FlowIDNUMTag fit;
+    if (p->PeekPacketTag(fit)) {
+        size = fit.GetFlowSize();
+    }
+
+    FlowState cur_flow;
+    cur_flow.sport = ch.udp.dport; // 反转
+    cur_flow.dport = ch.udp.sport; // 反转
+    cur_flow.src_ip = ch.dip; // 反转
+    cur_flow.dst_ip = ch.sip; // 反转
+    cur_flow.priority = ch.udp.pg;
+
+    // 第一次请求homa
+    if (ch.udp.homa_flag == 1) {
+        cur_flow.remaining_bytes = size >= ch.udp.init_grantedBytes ? size - ch.udp.init_grantedBytes : 0;
+    } else {
+        cur_flow.remaining_bytes = ch.udp.homa_flag;
+    }
+    
+    cur_flow.last_send_time = Simulator::Now();
+
+    if (cur_flow.remaining_bytes != 0) {
+        homa_scheduler.add_or_update_flow(cur_flow);
+    }
+
+    if (!homa_scheduler.has_flows()) {
+        return; 
+    }
+
+    // 防止二次启动homa逻辑
+    if (!this->homa_is_running) {
+        this->homa_is_running = true;
+        SendHomaPktFair();
+    }
+}
+
 void RdmaHw::SendHomaPkt() {
     FlowState grant_flow = request_queue.top();
     request_queue.pop();
@@ -386,21 +491,11 @@ void RdmaHw::SendHomaPkt() {
         // todo: 需要计算一个合理的值
         // Time next_grant_time = Seconds(rate.CalculateTxTime(newp->GetSize()));
         Time next_grant_time("1000ns"); // todo：实际带宽？
-#if (MY_DEBUG == true)
-        std::cout << "next_grant_time = " << next_grant_time << std::endl;
-        printf("[RdmaHw::SendHomaPkt] time = %.16lf\n", next_grant_time.GetSeconds());
-#endif
         Simulator::Schedule(next_grant_time, &RdmaHw::SendHomaPkt, this);
     }
 }
 
 void RdmaHw::HandleUdpHoma(Ptr<Packet> p, CustomHeader &ch) {
-    // 1. 是homa，未启动homa：启动homa逻辑，初始化流返回ack，并立即返回grant包。
-    // 2. 是homa，已启动homa：正常返回ack，这个流是否已经被掌握，没被掌握就添加流到请求队列。
-    // 3. 不是homa，正常返回ack。
-#if (MY_DEBUG == true)
-    std::cout << "[RdmaHw::HandleUdpHoma] " << "homa is " << (homa_is_running ? "running" : "not running") << std::endl;
-#endif
     uint64_t flow_hash = get_flow_id(ch.sip, ch.dip);
     if (request_queue_hash.find(flow_hash) != request_queue_hash.end()) {
         // 找到了，已经被homa掌握了，直接返回即可
@@ -411,16 +506,13 @@ void RdmaHw::HandleUdpHoma(Ptr<Packet> p, CustomHeader &ch) {
     FlowIDNUMTag fit;
     if (p->PeekPacketTag(fit)) {
         size = fit.GetFlowSize();
-#if (MY_DEBUG == true)
-        std::cout << "[RdmaHw::HandleUdpHoma] " << "FlowSize: " << fit.GetFlowSize() << std::endl;
-#endif
     }
 
     FlowState cur_flow;
-    cur_flow.sport = ch.udp.dport; // PS: 这里已经反过来了
-    cur_flow.dport = ch.udp.sport; // PS: 这里已经反过来了
-    cur_flow.src_ip = ch.dip; // PS: 这里已经反过来了
-    cur_flow.dst_ip = ch.sip; // PS: 这里已经反过来了
+    cur_flow.sport = ch.udp.dport; // 反转
+    cur_flow.dport = ch.udp.sport; // 反转
+    cur_flow.src_ip = ch.dip; // 反转
+    cur_flow.dst_ip = ch.sip; // 反转
     cur_flow.priority = ch.udp.pg;
     cur_flow.remaining_bytes = size >= ch.udp.init_grantedBytes ? size - ch.udp.init_grantedBytes : 0;
     cur_flow.last_send_time = Simulator::Now();
@@ -457,14 +549,7 @@ int RdmaHw::ReceiveHoma(Ptr<Packet> p, CustomHeader &ch) {
     Ptr<RdmaQueuePair> qp = GetQp(key);
 
     uint32_t grant_bytes = ch.ack.homa_grant_bytes;
-#if (MY_DEBUG == true)
-    // std::cout << "[RdmaHw::ReceiveHoma] " << "grant_bytes: " << grant_bytes << std::endl;
-    // std::cout << "[RdmaHw::ReceiveHoma] " << "before update m_grantedBytes: " << qp->homa.m_grantedBytes << std::endl;
-#endif
     qp->homa.m_grantedBytes += grant_bytes;
-#if (MY_DEBUG == true)
-    // std::cout << "[RdmaHw::ReceiveHoma] " << Settings::ip_to_node_id(qp->sip) << " after update m_grantedBytes: " << qp->homa.m_grantedBytes << std::endl;
-#endif
     // 找到qp对应的设备节点
     uint32_t nic_idx = GetNicIdxOfQp(qp);
     Ptr<QbbNetDevice> dev = m_nic[nic_idx].dev;
@@ -569,14 +654,12 @@ int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
         // send
         uint32_t nic_idx = GetNicIdxOfRxQp(rxQp);
         m_nic[nic_idx].dev->RdmaEnqueueHighPrioQ(newp);
-#if (MY_DEBUG == true)
-        // std::cout << "[RdmaHw::ReceiveUdp] " << "产生 ACK 包并发送" << std::endl;
-#endif
         m_nic[nic_idx].dev->TriggerTransmit();
     }
 
     if (ch.udp.homa_flag) {
-        HandleUdpHoma(p, ch);
+        // HandleUdpHoma(p, ch);
+        HandleUdpHomaFair(p, ch);
     }
     return 0;
 }
@@ -701,10 +784,6 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch) {
                 qp->irn.m_recovery = false;
             }
         } else {
-#if (MY_DEBUG == true)
-            // std::cout << "[ReceiveAck] qp->snd_nxt: " << qp->snd_nxt << std::endl;
-            // std::cout << "[ReceiveAck] qp->snd_una: " << qp->snd_nxt << std::endl;
-#endif
             if (qp->snd_nxt < qp->snd_una) {
                 qp->snd_nxt = qp->snd_una;
             }
@@ -965,7 +1044,7 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
     if (m_cc_mode == 9) {
         payload_size = qp->homa.m_grantedBytes;
     } else if (m_cc_mode == 10) {
-        payload_size = std::min(qp->hp.m_grantedBytes, qp->homa.m_grantedBytes); // todo: 
+        payload_size = std::min(qp->hp.m_grantedBytes, qp->homa.m_grantedBytes);
     } else {
         payload_size = qp->GetBytesLeft();
     }
@@ -975,9 +1054,6 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
     }
 
     qp->restSendSize -= payload_size;
-#if (MY_DEBUG == true)
-    // std::cout << "[RdmaHw::GetNxtPacket] payload_size: " << payload_size << std::endl;
-#endif
 
     uint32_t seq = (uint32_t)qp->snd_nxt;
     bool proceed_snd_nxt = true;
@@ -996,12 +1072,16 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
         // 如果当前流没有请求过
         homa_flag = 1;
         homa_is_request = true;
-    }
-    
-    if (homa_flag == 1) {
-#if (MY_DEBUG == true)
-        // std::cout << "[RdmaHw::GetNxtPacket] " << "Set Homa request!" << std::endl;
-#endif
+    } else if (qp->homa.m_enabled && homa_is_request && homa_request_again) {
+        homa_flag = homa_request_again_bytes;
+        homa_request_again = false;
+
+        std::cout << "[HOMA request send again]" << " "
+                  << Simulator::Now().GetNanoSeconds() << "\t"
+                  << Settings::ip_to_node_id(qp->sip) << " -> "
+                  << Settings::ip_to_node_id(qp->dip) << "\t"
+                  << homa_request_again_bytes << " bytes"
+                  << std::endl;
     }
     
     seqTs.SetHomaFlag(homa_flag); // for homa_flag
@@ -1029,10 +1109,6 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
     ppp.SetProtocol(0x0021);  // EtherToPpp(0x800), see point-to-point-net-device.cc
     p->AddHeader(ppp);
 
-    // 当前qp总共需要发送的字节数量，以及payload_size
-#if (MY_DEBUG == true)
-    // std::cout << "[RdmaHw::GetNxtPacket] " << "当前QP总大小: " << qp->m_size << ", payload_size: " << payload_size << std::endl;
-#endif
     // attach Stat Tag
     uint8_t packet_pos = UINT8_MAX;
     {
@@ -1071,11 +1147,25 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
             qp->homa.m_grantedBytes -= payload_size;
         } else if (m_cc_mode == 10) {
             // 拉平令牌桶数量,为了快速相应
-            // todo: homa 拉平无法处理
-
             qp->homa.m_grantedBytes -= payload_size;
             qp->hp.m_grantedBytes -= payload_size;
+            
+            // homa 向 hpcc 对齐（阈值对齐）
+            const int margin = 20000; // 一次授权12000，这个值应该大于12000
+            if (qp->homa.m_grantedBytes > qp->hp.m_grantedBytes + margin) {
+                uint64_t avail_gBytes = qp->homa.m_grantedBytes - qp->hp.m_grantedBytes;
+                // 重新请求HOMA
+                homa_request_again = true;
+                homa_request_again_bytes = avail_gBytes;
+                qp->homa.m_grantedBytes = qp->hp.m_grantedBytes; 
+                std::cout << "[HOMA request again]" << " "
+                          << Settings::ip_to_node_id(qp->sip) << " -> "
+                          << Settings::ip_to_node_id(qp->dip) << " "
+                          << homa_request_again_bytes << " bytes"
+                          << std::endl;
+            }
 
+            // hpcc 向 homa 对齐（立即对齐）
             if (qp->homa.m_grantedBytes < qp->hp.m_grantedBytes) {
                 uint64_t avail_gBytes = qp->hp.m_grantedBytes - qp->homa.m_grantedBytes;
                 qp->hp.m_grantedBytes = qp->homa.m_grantedBytes;
@@ -1380,10 +1470,6 @@ void RdmaHw::UpdateRateHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch
                 double u = txRate / ih.hop[i].GetLineRate() +
                            (double)std::min(ih.hop[i].GetQlen(), qp->hp.hop[i].GetQlen()) *
                                qp->m_max_rate.GetBitRate() / ih.hop[i].GetLineRate() / qp->m_win;
-#if (MY_DEBUG == true)
-                std::cout << "time: " << Simulator::Now() << " ";
-                printf("hpcc-debug:%d, %lf\n", Settings::ip_to_node_id(qp->sip), u);
-#endif
 #if PRINT_LOG
                 if (print) printf(" %.3lf %.3lf", txRate, u);
 #endif

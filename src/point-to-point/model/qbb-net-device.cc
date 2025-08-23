@@ -121,12 +121,6 @@ int RdmaEgressQueue::GetNextQindex(bool paused[]) {
         
         bool is_homa = qp->homa.m_enabled; // homa是否启用
         bool is_homa_hpcc = qp->hp.m_homa_hpcc; // homa+hpcc是否同时启用
-        // std::cout << "[GetNextQindex] is_homa: " << is_homa << std::endl;
-#if (MY_DEBUG == true)
-        std::cout << "[RdmaEgressQueue::GetNextQindex] " << "当前为 Host 端，节点 " << Settings::ip_to_node_id(m_qpGrp->m_qps[(qIndex + m_rrlast) % fcount]->sip) << std::endl;
-        std::cout << "[RdmaEgressQueue::GetNextQindex] sip: " << Settings::ip_to_node_id(m_qpGrp->m_qps[(qIndex + m_rrlast) % fcount]->sip) << ", dip: " << Settings::ip_to_node_id(m_qpGrp->m_qps[(qIndex + m_rrlast) % fcount]->dip) << std::endl;
-        // std::cout << "[GetNextQindex] cond1: " << cond1 << ", cond2: " << cond2 << ", homa_can_do: " << (qp->homa.m_grantedBytes > 0 && is_homa ? 1 : 0) << std::endl;
-#endif
         std::cout << "[RdmaEgressQueue::GetNextQindex] "
                   << "time: " << Simulator::Now().GetNanoSeconds() << " "
                 //   << "next_time: " << qp->m_nextAvail.GetNanoSeconds() << " "
@@ -147,9 +141,6 @@ int RdmaEgressQueue::GetNextQindex(bool paused[]) {
         if (!cond2 && !m_qpGrp->IsQpFinished((qIndex + m_rrlast) % fcount)) {
             // std::cout << "[GetNextQindex] 进入判断qp是否完成的逻辑" << std::endl;
             if (qp->IsFinishedConst()) {
-#if (MY_DEBUG == true)
-                std::cout << "[RdmaEgressQueue::GetNextQindex] 当前qp " << Settings::ip_to_node_id(qp->sip) << " 完成发送任务!" << std::endl;
-#endif
                 m_qpGrp->SetQpFinished((qIndex + m_rrlast) % fcount);
             }
         }
@@ -160,9 +151,6 @@ int RdmaEgressQueue::GetNextQindex(bool paused[]) {
                 Simulator::Now().GetTimeStep()) {
                 // not available now
             } else {
-#if (MY_DEBUG == true)
-                std::cout << "DEBUG: 222" << std::endl;
-#endif
                 // blocked by PFC
                 int32_t flowid = m_qpGrp->Get((qIndex + m_rrlast) % fcount)->m_flow_id;
                 if (!MAP_KEY_EXISTS(current_pause_time, flowid))
@@ -191,13 +179,6 @@ int RdmaEgressQueue::GetNextQindex(bool paused[]) {
             if (is_homa_hpcc) {
                 int threshold = (qp->restSendSize <= m_mtu) ? qp->restSendSize : m_mtu;
                 if (qp->homa.m_grantedBytes >= threshold && qp->hp.m_grantedBytes >= threshold) {
-#if (MY_DEBUG == true)
-                    std::cout << "DEBUG: HOMA_HPCC" << std::endl;
-                    // std::cout << "[RdmaEgressQueue::GetNextQindex] " << Settings::ip_to_node_id(qp->sip) 
-                    //         << " homa_grantedBytes: " << qp->homa.m_grantedBytes 
-                    //         << " hpcc_grantedBytes: " << qp->hp.m_grantedBytes
-                    //         << " restSize: " << qp->restSize << std::endl;
-#endif
                     return (qIndex + m_rrlast) % fcount;
                 }
             }
@@ -206,10 +187,6 @@ int RdmaEgressQueue::GetNextQindex(bool paused[]) {
             else if (is_homa) {
                 int threshold = (qp->restSendSize <= m_mtu) ? qp->restSendSize : m_mtu;
                 if (qp->homa.m_grantedBytes >= threshold) {
-#if (MY_DEBUG == true)
-                    std::cout << "DEBUG: HOMA" << std::endl;
-
-#endif
                     return (qIndex + m_rrlast) % fcount;
                 }
             }
@@ -370,7 +347,6 @@ void QbbNetDevice::DequeueAndTransmit(void) {
                                                  &QbbNetDevice::DequeueAndTransmit, this);
             }
         }
-        // std::cout << "[DequeueAndTransmit]" << std::endl << std::endl;
         return;
     } else {                               // switch, doesn't care about qcn, just send
         p = m_queue->DequeueRR(m_paused);  // this is round-robin
@@ -445,38 +421,27 @@ void QbbNetDevice::Receive(Ptr<Packet> packet) {
     CustomHeader ch(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
     ch.getInt = 1;  // parse INT header
     packet->PeekHeader(ch);
-    
+
+#if (MY_DEBUG == true)
     if (m_node->GetNodeType() > 0) {
-#if (MY_DEBUG == true)
         std::cout << "[QbbNetDevice::Receive] " << "当前为 Switch 端，节点 " << m_node->GetId() << std::endl;
-#endif
     } else {
-#if (MY_DEBUG == true)
         std::cout << "[QbbNetDevice::Receive] " << "当前为 Host 端，节点 " << m_node->GetId() << std::endl;
-#endif
     }
-#if (MY_DEBUG == true)
     std::cout << "[QbbNetDevice::Receive] " << "sip: " << Settings::ip_to_node_id(Ipv4Address(ch.sip)) << ", dip: " << Settings::ip_to_node_id(Ipv4Address(ch.dip)) << std::endl;
-#endif
     if (ch.l3Prot == 0xFB) { //homa
-#if (MY_DEBUG == true)
         std::cout << "[QbbNetDevice::Receive] " << "收到 HOMA 授权包" << ", 当前时间为: " << Simulator::Now()  << std::endl;
         std::cout << "[QbbNetDevice::Receive] " << "homa_grant_bytes: " << ch.ack.homa_grant_bytes << std::endl;
-#endif
     }
 
     if (ch.l3Prot == 0xFC) { //ack
-#if (MY_DEBUG == true)
         std::cout << "[QbbNetDevice::Receive] " << "收到 ACK 包" << ", 当前时间为: " << Simulator::Now() << std::endl;
-#endif
     }
     
     if (ch.l3Prot == 0x11) { // udp
-#if (MY_DEBUG == true)
         std::cout << "[QbbNetDevice::Receive] " << "收到 UDP 包" << ", 当前时间为: " << Simulator::Now() << std::endl;
-        // std::cout << "[QbbNetDevice::Receive] " << "homaflag: " << ch.udp.homa_flag << std::endl;
-#endif
     }
+#endif
 
     if (ch.l3Prot == 0xFE) {  // PFC 先处理PFC数据包
         if (!m_qbbEnabled) return;
@@ -496,25 +461,17 @@ void QbbNetDevice::Receive(Ptr<Packet> packet) {
     } else {                              // non-PFC packets (data, ACK, NACK, CNP...)
         if (m_node->GetNodeType() > 0) {  // switch
             packet->AddPacketTag(FlowIdTag(m_ifIndex));
-
+#if (MY_DEBUG == true)
             if (ch.l3Prot == 0xFB) { //homa
-#if (MY_DEBUG == true)
                 std::cout << "[QbbNetDevice::Receive] " << "传递 HOMA 包" << std::endl;
-#endif
             }
-
             if (ch.l3Prot == 0xFC) { //ack
-#if (MY_DEBUG == true)
                 std::cout << "[QbbNetDevice::Receive] " << "传递 ACK 包" << std::endl;
-#endif
             }
-            
             if (ch.l3Prot == 0x11) { // udp
-#if (MY_DEBUG == true)
                 std::cout << "[QbbNetDevice::Receive] " << "传递 UDP 包" << std::endl;
-#endif
             }
-
+#endif
             m_node->SwitchReceiveFromDevice(this, packet, ch); // 继续向下传 SwitchNode::SwitchReceiveFromDevice
         } else {  // NIC
             // send to RdmaHw
@@ -580,11 +537,7 @@ bool QbbNetDevice::TransmitStart(Ptr<Packet> p) {
     m_currentPkt = p; // 当前要发送的包
     m_phyTxBeginTrace(m_currentPkt);
     Time txTime = Seconds(m_bps.CalculateTxTime(p->GetSize()));
-    // std::cout << "[TransmitStart] m_bps: " << m_bps.GetBitRate() << std::endl;
     Time txCompleteTime = txTime + m_tInterframeGap; // 传输时间 + 帧间间隔时间
-#if (MY_DEBUG == true)
-    std::cout << "[QbbNetDevice::TransmitStart] " << "Now: " << Simulator::Now() << ", use " << txCompleteTime << std::endl;
-#endif
     NS_LOG_LOGIC("Schedule TransmitCompleteEvent in " << txCompleteTime.GetSeconds() << "sec");
     Simulator::Schedule(txCompleteTime, &QbbNetDevice::TransmitComplete, this); // 模拟：发送完当前数据包，继续调用该节点的发送逻辑
 
