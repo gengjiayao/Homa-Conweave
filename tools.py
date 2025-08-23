@@ -2,7 +2,7 @@
 # 1. 可视化 qlens、接收/发送带宽、hpcc下的qp_rate速率。
 # 2. 支持对多个节点或多个Flow进行对比，生成对比图。
 # 3. 检查并防止同时指定多个节点和多个Flow。
-# 4. (功能待实现) 可以进行 tab 自动补全 flow
+# 4. 可以进行 tab 自动补全 flow
 
 import argparse
 import re
@@ -63,9 +63,10 @@ def process_bandwidth_file(file_path, node_id, batch_size):
 
 def draw_bandwidth(data_pairs, labels, colors=None):
     plt.figure(figsize=(12, 6))
-    if not colors:
-        colors = plt.cm.tab10(np.linspace(0, 1, len(data_pairs)))
+    if colors is None:
+        colors = plt.get_cmap('tab10')(np.linspace(0, 1, len(data_pairs)))
     plt.style.use('seaborn-v0_8-whitegrid')
+
     for i, (x, y) in enumerate(data_pairs):
         plt.plot(x, y, label=labels[i], color=colors[i], linewidth=1, alpha=0.8)
     plt.title("Bandwidth Comparison", fontsize=16, fontweight='bold')
@@ -133,11 +134,14 @@ def process_qlen_file(file_path, node_id, time_offset_ns=None, batch_size=5):
 def draw_qlen(data_pairs, labels, colors=None, title="Qlen Comparison"):
     """根据提供的数据对和标签绘制qlen图。"""
     plt.figure(figsize=(12, 6))
-    if not colors:
-        colors = plt.cm.get_cmap('tab10', max(10, len(data_pairs)))
+    if colors is None:
+        cmap = plt.get_cmap('tab10')
+        colors = cmap(np.linspace(0, 1, len(data_pairs)))
+
     plt.style.use('seaborn-v0_8-whitegrid')
     for i, (x, y) in enumerate(data_pairs):
-        plt.plot(x, y, label=labels[i], color=colors(i), linewidth=2, alpha=0.9)
+        plt.plot(x, y, label=labels[i], color=colors[i], linewidth=2, alpha=0.9)
+
     plt.title(title, fontsize=16, fontweight='bold')
     plt.xlabel("Time (ms)", fontsize=14)
     plt.ylabel("Egress Bytes (qlen)", fontsize=14)
@@ -250,14 +254,14 @@ def main():
 
         if m_value in ["tx", "rx"]:
             for node in n_values:
-                file = f"/root/ns-3.19/mix/output/{flow}/{flow}_out_throughout.txt"
+                file = f"./mix/output/{flow}/{flow}_out_throughout.txt"
                 times, tx, rx = process_bandwidth_file(file, node, BANDWIDTH_BATCH_SIZE)
                 all_data_pairs.append((times, tx if m_value == "tx" else rx))
                 all_labels.append(f"{flow}-node{node}")
             draw_bandwidth(all_data_pairs, all_labels)
 
         elif m_value == "qlen":
-            file = f"/root/ns-3.19/mix/output/{flow}/{flow}_out_qlen.txt"
+            file = f"./mix/output/{flow}/{flow}_out_qlen.txt"
             for node in n_values:
                 # 获取该节点所有端口的数据
                 data_pairs_node, labels_node = process_qlen_file(file, node, QLEN_BATCH_SIZE)
@@ -277,7 +281,7 @@ def main():
 
         if m_value in ["tx", "rx"]:
             for flow in f_values:
-                file = f"/root/ns-3.19/mix/output/{flow}/{flow}_out_throughout.txt"
+                file = f"./mix/output/{flow}/{flow}_out_throughout.txt"
                 times, tx, rx = process_bandwidth_file(file, node, BANDWIDTH_BATCH_SIZE)
                 all_data_pairs.append((times, tx if m_value == "tx" else rx))
                 all_labels.append(f"{flow}-node{node}")
@@ -285,7 +289,7 @@ def main():
 
         elif m_value == "qlen":
             for flow in f_values:
-                file = f"/root/ns-3.19/mix/output/{flow}/{flow}_out_qlen.txt"
+                file = f"./mix/output/{flow}/{flow}_out_qlen.txt"
                 data_pairs_flow, labels_flow = process_qlen_file(file, node, QLEN_BATCH_SIZE)
                 all_data_pairs.extend(data_pairs_flow)
                 all_labels.extend([f"Flow {flow} - {lbl}" for lbl in labels_flow])
@@ -301,36 +305,36 @@ def main():
         flow = f_values[0]
 
         if m_value in ["tx", "rx"]:
-            file = f"/root/ns-3.19/mix/output/{flow}/{flow}_out_throughout.txt"
+            file = f"./mix/output/{flow}/{flow}_out_throughout.txt"
             times, tx, rx = process_bandwidth_file(file, node, BANDWIDTH_BATCH_SIZE)
             data = (times, tx if m_value == "tx" else rx)
             label = f"{flow}-node{node}"
             draw_bandwidth([data], [label])
 
         elif m_value == "qlen":
-            file = f"/root/ns-3.19/mix/output/{flow}/{flow}_out_qlen.txt"
+            file = f"./mix/output/{flow}/{flow}_out_qlen.txt"
             # 这是您最核心的场景
             data_pairs, labels = process_qlen_file(file, node, QLEN_BATCH_SIZE)
             title = f"Qlen for Switch Node {node} (Flow: {flow})"
             draw_qlen(data_pairs, labels, title=title)
         
         elif m_value == "hprate":
-            file = f"/root/ns-3.19/mix/output/{flow}/config.log"
+            file = f"./mix/output/{flow}/config.log"
             results = parse_rdma_log_file(file)
             time, hpcc_u, hpcc_rate = [], [], []
             for item in results:
-                if node == int(item['variables']['node']):
+                if 'node' in item['variables'] and node == int(item['variables']['node']):
                     time.append((float(int(item['variables']['time']) - 2000000000)) / 1e6)
                     hpcc_u.append(float(item['variables']['u']))
                     hpcc_rate.append(float(item['variables']['hp_rate']))
             draw_hprate(time, hpcc_u, hpcc_rate, 1)
 
         elif m_value == "grantbytes":
-            file = f"/root/ns-3.19/mix/output/{flow}/config.log"
+            file = f"./mix/output/{flow}/config.log"
             results = parse_rdma_log_file(file)
             time, hpcc_gBytes, homa_gBytes = [], [], []
             for item in results:
-                if node == int(item['variables']['node']):
+                if 'node' in item['variables'] and node == int(item['variables']['node']):
                     time.append((float(int(item['variables']['time']) - 2000000000)) / 1e6)
                     hpcc_gBytes.append(float(item['variables']['hp_gBytes']))
                     homa_gBytes.append(float(item['variables']['homa_gBytes']))

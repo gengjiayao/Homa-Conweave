@@ -13,3 +13,4 @@ analysis/figures/*.pdf
 __pycache__
 mix/*
 my_pic/*
+.python-version
