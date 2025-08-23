@@ -147,8 +147,9 @@ public:
         } else {
             while (!fair_scheduler_queue.empty()) {
                 current_key = fair_scheduler_queue.front();
-                fair_scheduler_queue.pop_front(); // "惰性"删除
+                fair_scheduler_queue.pop_front();
 
+                // "惰性"删除（暂时没什么用）
                 if (fair_queue_set.count(current_key)) {
                     fair_queue_set.erase(current_key);
                     got_flow = true;
@@ -160,7 +161,7 @@ public:
         if (!got_flow) {
             return false;
         }
-        
+                 
         FlowState& current_flow = flow_map.at(current_key);
         current_flow.current_queue = QueueType::NONE;
         process_callback(current_flow);
