@@ -14,3 +14,4 @@ __pycache__
 mix/*
 my_pic/*
 .python-version
+compile_commands.json
