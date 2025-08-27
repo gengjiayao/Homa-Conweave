@@ -14,8 +14,9 @@ import os
 import re
 from collections import defaultdict
 from typing import List, Dict, Tuple, Any, Optional
-
+from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
+import matplotlib.collections as mcoll
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -259,31 +260,60 @@ def draw_hprate(time: List[float], hpcc_u: List[float], hpcc_rate: List[float], 
     plt.close()
     print(f"HP Rate图已保存至 {os.path.join(OUTPUT_DIR, 'hprate.png')}")
 
-
 def draw_grantbytes(time: List[float], hpcc_gBytes: List[float], homa_gBytes: List[float], batch_size: int):
-    """绘制 HPCC 和 Homa 的 grant bytes 对比图。"""
-    time_b = batch_mean(time, batch_size)
-    hpcc_gBytes_b = batch_mean(hpcc_gBytes, batch_size)
-    homa_gBytes_b = batch_mean(homa_gBytes, batch_size)
+    """
+    绘制 HPCC 和 Homa 的 grant bytes 对比图。
+    并在下方新增一张动态着色的图，显示二者的最小值及其来源。
+    """
+    time_b = np.array(batch_mean(time, batch_size))
+    hpcc_gBytes_b = np.array(batch_mean(hpcc_gBytes, batch_size))
+    homa_gBytes_b = np.array(batch_mean(homa_gBytes, batch_size))
 
-    fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, figsize=(10, 8), sharex=True)
-    fig.suptitle('HPCC vs Homa Grant Bytes', fontsize=16, fontweight='bold')
+    fig, (ax1, ax2, ax3) = plt.subplots(nrows=3, ncols=1, figsize=(10, 12), sharex=True)
+    fig.suptitle('HPCC vs Homa Grant Bytes Analysis', fontsize=16, fontweight='bold')
 
-    ax1.plot(time_b, hpcc_gBytes_b, color='C0', label='HPCC')
+    # --- 第一张图: HPCC ---
+    hpcc_color = 'C0' # 定义 HPCC 颜色
+    ax1.plot(time_b, hpcc_gBytes_b, color=hpcc_color, label='HPCC')
     ax1.set_ylabel('HPCC Grant Bytes')
     ax1.grid(True, linestyle='--', alpha=0.6)
     ax1.legend()
 
-    ax2.plot(time_b, homa_gBytes_b, color='C3', label='Homa')
-    ax2.set_xlabel('Time (ms)')
+    # --- 第二张图: Homa ---
+    homa_color = 'C3' # 定义 Homa 颜色
+    ax2.plot(time_b, homa_gBytes_b, color=homa_color, label='Homa')
     ax2.set_ylabel('Homa Grant Bytes')
     ax2.grid(True, linestyle='--', alpha=0.6)
     ax2.legend()
 
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    # --- 第三张图: 动态着色的最小值图 ---
+    
+    min_gBytes_b = np.minimum(hpcc_gBytes_b, homa_gBytes_b)
+    
+    colors = np.where(hpcc_gBytes_b <= homa_gBytes_b, hpcc_color, homa_color)
+
+    points = np.array([time_b, min_gBytes_b]).T.reshape(-1, 1, 2)
+    segments = np.concatenate([points[:-1], points[1:]], axis=1)
+
+    lc = mcoll.LineCollection(segments, colors=colors[:-1], linewidths=2)
+
+    ax3.add_collection(lc)
+    ax3.autoscale_view() # 必须调用此方法来自动调整坐标轴范围
+
+    legend_elements = [
+        Line2D([0], [0], color=hpcc_color, lw=2, label='HPCC'),
+        Line2D([0], [0], color=homa_color, lw=2, label='Homa')
+    ]
+    ax3.legend(handles=legend_elements)
+
+    ax3.set_xlabel('Time (ms)', fontsize=14) # X轴标签只在最下方的图显示
+    ax3.set_ylabel('Minimum Grant Bytes', fontsize=14)
+    ax3.grid(True, linestyle='--', alpha=0.6)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96]) # 调整布局以适应主标题
     plt.savefig(os.path.join(OUTPUT_DIR, "grantbytes.png"), dpi=300)
     plt.close()
-    print(f"Grant Bytes图已保存至 {os.path.join(OUTPUT_DIR, 'grantbytes.png')}")
+    print(f"Grant Bytes 组合分析图已保存至 {os.path.join(OUTPUT_DIR, 'grantbytes.png')}")
 
 
 # =============================================================================
