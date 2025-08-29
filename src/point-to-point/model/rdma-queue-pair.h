@@ -77,10 +77,13 @@ class RdmaQueuePair : public Object {
     uint64_t restSendSize;
     
     struct {
-        bool m_enabled{false};
-        uint64_t m_grantedBytes{0};
-        uint64_t m_init_grantedBytes{0};
-        DataRate m_curRate;
+        bool m_enabled{false}; // 当前qp是否配置homa
+        bool m_was_request{false}; // 当前qp是否发送过homa请求（unfair-homa）
+        bool m_request_again{false}; // 当前qp是否再次发送homa请求（fair-homa）
+        uint32_t m_request_again_bytes{0}; // （fair-homa）
+        uint64_t m_grantedBytes{0}; // HOMA令牌桶
+        uint64_t m_init_grantedBytes{0}; // 初始化授权字节数，需要与 flow_size 取小 (todo:后续可重构)
+        uint64_t m_fly_grant_bytes{0}; // 飞行HOMA授权包的令牌数，用于配合 mtu 判断（fair-homa）
     } homa;
     struct {
         DataRate m_targetRate;  //< Target rate

@@ -320,9 +320,8 @@ class RdmaHw : public Object {
     /**********************
      * Homa
      *********************/
-    bool homa_is_running = false; // 当前rdmahw的HOMA逻辑是否启用
+    bool homa_is_running = false; // 当前rdmahw的HOMA逻辑是否启用（位于接收方）
     // 非公平HOMA
-    bool homa_is_request = false; // 当前流是否已经请求过HOMA调度（位于流发送方）
     std::priority_queue<FlowState> request_queue; // 根据流做优先队列（HOMA非公平调度）
     std::unordered_map<uint64_t, FlowState> request_queue_hash; // 哈希表记录哪些qp已经入队
     uint64_t get_flow_id (uint32_t src, uint32_t dst);
@@ -333,8 +332,6 @@ class RdmaHw : public Object {
     FlowScheduler homa_scheduler; // HOMA公平调度器
     void HandleUdpHomaFair(Ptr<Packet> p, CustomHeader &ch);
     void SendHomaPktFair();
-    bool homa_request_again = false; // 位于流发送方
-    uint32_t homa_request_again_bytes = 0; // 位于流发送方
 
     int ReceiveHoma(Ptr<Packet> p, CustomHeader &ch);
     void HandleAckHoma(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch);

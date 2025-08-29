@@ -140,7 +140,11 @@ uint64_t RdmaQueuePair::GetWin() {
     if (m_win == 0) return 0;
     uint64_t w;
     if (m_var_win) {
-        w = m_win * m_rate.GetBitRate() / m_max_rate.GetBitRate();
+        if (homa.m_enabled && hp.m_homa_hpcc) {
+            w = m_win * hp.m_grantRate.GetBitRate() / m_max_rate.GetBitRate();
+        } else {
+            w = m_win * m_rate.GetBitRate() / m_max_rate.GetBitRate();
+        }
         if (w == 0) w = 1;  // must > 0
     } else {
         w = m_win;

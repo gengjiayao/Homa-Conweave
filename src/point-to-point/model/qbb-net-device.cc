@@ -132,6 +132,7 @@ int RdmaEgressQueue::GetNextQindex(bool paused[]) {
                 //   << "hpccRestGrantSize: " << qp->hp.m_restGrantBytes << " "
                   << "hp_rate: " << (double)qp->hp.m_grantRate.GetBitRate() / 1000000000  << " "
                   << "u: " << qp->hp.u << " "
+                  << "homa_fly_gBytes: " << qp->homa.m_fly_grant_bytes << " "
                 //   << "win: " << qp->GetWin() << " "
                 //   << "cond1: " << cond1 << " " << "cond2: " << cond2 << " " 
                 //   << "cond_w: " << cond_window_allowed << " "
@@ -178,7 +179,9 @@ int RdmaEgressQueue::GetNextQindex(bool paused[]) {
             // Homa-Hpcc结合协议
             if (is_homa_hpcc) {
                 int threshold = (qp->restSendSize <= m_mtu) ? qp->restSendSize : m_mtu;
-                if (qp->homa.m_grantedBytes >= threshold && qp->hp.m_grantedBytes >= threshold) {
+                bool homa_hpcc_cond1 = (qp->homa.m_grantedBytes >= threshold && qp->hp.m_grantedBytes >= threshold);
+                bool homa_hpcc_cond2 = (qp->homa.m_fly_grant_bytes == 0 && qp->homa.m_request_again);
+                if (homa_hpcc_cond1 || homa_hpcc_cond2) {
                     return (qIndex + m_rrlast) % fcount;
                 }
             }
