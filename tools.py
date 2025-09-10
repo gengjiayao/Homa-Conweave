@@ -26,7 +26,7 @@ import plotly.graph_objects as go
 # Constants and Configurations
 # =============================================================================
 OUTPUT_DIR = "./my_pic"
-BANDWIDTH_BATCH_SIZE = 100
+BANDWIDTH_BATCH_SIZE = 1000
 QLEN_BATCH_SIZE = 10
 HPRATE_BATCH_SIZE = 1
 GRANTBYTES_BATCH_SIZE = 10
@@ -115,6 +115,8 @@ def draw_bandwidth(data_pairs: List[Tuple[List[float], List[float]]], labels: Li
     plt.title("Bandwidth Comparison", fontsize=16, fontweight='bold')
     plt.xlabel("Time (ms)", fontsize=14)
     plt.ylabel("Bandwidth (Gbps)", fontsize=14)
+    plt.ylim(0, 100)
+    plt.yticks(np.arange(0, 101, 10))
     plt.grid(True, linestyle='--', alpha=0.6, color='gray')
     plt.gca().spines['top'].set_visible(False)
     plt.gca().spines['right'].set_visible(False)
@@ -290,7 +292,7 @@ def draw_grantbytes(time: List[float], hpcc_gBytes: List[float], homa_gBytes: Li
     
     min_gBytes_b = np.minimum(hpcc_gBytes_b, homa_gBytes_b)
     
-    colors = np.where(hpcc_gBytes_b <= homa_gBytes_b, hpcc_color, homa_color)
+    colors = np.where(hpcc_gBytes_b < homa_gBytes_b, hpcc_color, homa_color)
 
     points = np.array([time_b, min_gBytes_b]).T.reshape(-1, 1, 2)
     segments = np.concatenate([points[:-1], points[1:]], axis=1)

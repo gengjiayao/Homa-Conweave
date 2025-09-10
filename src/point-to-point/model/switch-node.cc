@@ -327,7 +327,33 @@ void SwitchNode::DoSwitchSend(Ptr<Packet> p, CustomHeader &ch, uint32_t outDev, 
         CheckAndSendPfc(inDev, qIndex);
     }
 
-    m_devices[outDev]->SwitchSend(qIndex, p, ch);
+    m_devices[outDev]->SwitchSend(qIndex, p, ch); // ifindex调用SwitchSend
+}
+
+bool SwitchNode::CheckLastHop(uint32_t ifIndex) {
+    bool last_hop_device = false;
+    if (m_isToR) {
+        Ptr<Node> peerNode = nullptr;
+        Ptr<NetDevice> egressDev = m_devices[ifIndex];
+        if (egressDev) {
+            Ptr<Channel> channel = egressDev->GetChannel();
+            if (channel && channel->GetNDevices() > 1) {
+                for (uint32_t i = 0; i < channel->GetNDevices(); ++i) {
+                    Ptr<NetDevice> peerDev = channel->GetDevice(i);
+                    if (peerDev != egressDev) {
+                        peerNode = peerDev->GetNode();
+                        break;
+                    }
+                }
+            }
+        }
+        // peerNode is host.
+        if (peerNode->GetNodeType() == 0) {
+            // std::cout << "[SwitchNotifyDequeue]" << " From " << egressDev->GetNode()->GetId() << " To " << peerNode->GetId() << std::endl;
+            last_hop_device = true;
+        }
+    }
+    return last_hop_device;
 }
 
 void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Packet> p) {
@@ -366,7 +392,8 @@ void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Pack
             IntHeader *ih = (IntHeader *)&buf[PppHeader::GetStaticSize() + 20 + 8 +
                                               6 + 4 + 8];  // ppp, ip(20), udp(8), SeqTs(6), homa_flag(4), init_grantedBytes(8), INT
             Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(m_devices[ifIndex]);
-            if (m_ccMode == 3 || m_ccMode == 10) {  // HPCC
+            bool is_last_hop = CheckLastHop(ifIndex) && true; // "false" for old-HPCC-HOMA
+            if (m_ccMode == 3 || (m_ccMode == 10 && !is_last_hop)) {  // HPCC
                 ih->PushHop(Simulator::Now().GetTimeStep(), m_txBytes[ifIndex],
                             dev->GetQueue()->GetNBytesTotal(), dev->GetDataRate().GetBitRate());
             }

@@ -106,12 +106,12 @@ QbbChannel::TransmitStart (
   else if (ch.l3Prot == 0xFC) ss = "ACK";
   else if (ch.l3Prot == 0xFB) ss = "HOMA";
   else if (ch.l3Prot == 0xFE) ss = "PFC";
-  std::cout << "[Trans]" << " "
-            << "time: " << Simulator::Now().GetNanoSeconds() << " "
-            << "From" << "-" <<  m_link[wire].m_src->GetNode()->GetId() << "-"
-            << "to" << "-" << m_link[wire].m_dst->GetNode()->GetId() << " " 
-            << ss << " "
-            << std::endl;
+  // std::cout << "[Trans]" << " "
+  //           << "time: " << Simulator::Now().GetNanoSeconds() << " "
+  //           << "From" << "-" <<  m_link[wire].m_src->GetNode()->GetId() << "-"
+  //           << "to" << "-" << m_link[wire].m_dst->GetNode()->GetId() << " " 
+  //           << ss << " "
+  //           << std::endl;
 
   Simulator::ScheduleWithContext (m_link[wire].m_dst->GetNode ()->GetId (),
                                   txTime + m_delay, &QbbNetDevice::Receive,

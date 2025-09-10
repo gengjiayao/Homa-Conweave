@@ -251,14 +251,15 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
             for (uint32_t i = 0; i < IntHeader::maxHop; i++) qp->hp.hopState[i].Rc = m_bps;
         }
         qp->hp.m_grantRate = m_bps; // 初始化带宽 100Gbps
-        const uint64_t hp_init_grantedBytes = 12500; // 初始化HPCC授权12500 (1000ns满带宽)
-        qp->hp.m_grantedBytes = hp_init_grantedBytes > size ? size : hp_init_grantedBytes; 
+        const uint64_t hp_init_grantedBytes = win; // 初始化HPCC授权12500 (1000ns满带宽)
+        qp->hp.m_grantedBytes = hp_init_grantedBytes > size ? size : hp_init_grantedBytes;
         qp->hp.m_restGrantBytes = size > qp->hp.m_grantedBytes ? size - qp->hp.m_grantedBytes : 0;
-        UpdateGrantBytesHp(qp);
+        Time next_grant_time("10ns");
+        Simulator::Schedule(next_grant_time, &RdmaHw::UpdateGrantBytesHp, this, qp);
         
         // HOMA控制
         qp->homa.m_enabled = true; // 设定homa拥塞控制
-        qp->homa.m_init_grantedBytes = 10000;
+        qp->homa.m_init_grantedBytes = win;
         qp->homa.m_grantedBytes = qp->homa.m_init_grantedBytes < size ? qp->homa.m_init_grantedBytes : size; // 设定初始令牌桶令牌数
         qp->homa.m_fly_grant_bytes = size - qp->homa.m_grantedBytes; // 设定未到达发送方的授权包字节数
     }
@@ -550,6 +551,8 @@ int RdmaHw::ReceiveHoma(Ptr<Packet> p, CustomHeader &ch) {
     uint64_t key = GetQpKey(ch.sip, port, sport, qIndex);
     Ptr<RdmaQueuePair> qp = GetQp(key);
 
+    // std::cout << "[ReceiveHoma]" << " " << Settings::ip_to_node_id(qp->sip) << std::endl;
+
     uint32_t grant_bytes = ch.ack.homa_grant_bytes;
     qp->homa.m_grantedBytes += grant_bytes; // 增加令牌数
     qp->homa.m_fly_grant_bytes -= grant_bytes; // 等待授权的令牌数减少
@@ -758,7 +761,9 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch) {
             uint32_t goback_seq = seq / m_chunk * m_chunk;
             qp->Acknowledge(goback_seq);
         }
-        // std::cout << "[ReceiveAck] qp->irn.m_enabled: " << qp->irn.m_enabled << std::endl; 
+
+        // std::cout << "[ReceiveAck]" << " " << Simulator::Now().GetNanoSeconds() << " " << Settings::ip_to_node_id(qp->sip) << std::endl;
+
         if (qp->irn.m_enabled) {
             // handle NACK
             NS_ASSERT(ch.l3Prot == 0xFD);
@@ -1413,11 +1418,11 @@ void RdmaHw::HyperIncreaseMlx(Ptr<RdmaQueuePair> q) {
 void RdmaHw::HandleAckHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch) {
     uint32_t ack_seq = ch.ack.seq;
     // update rate
-    std::cout << "[HandleAckHp]" << " "
-              << "node: " << Settings::ip_to_node_id(qp->sip) << "\t"
-              << "ack_seq: " << ack_seq << "\t"
-              << "lastUpdateSeq: " << qp->hp.m_lastUpdateSeq
-              << std::endl;
+    // std::cout << "[HandleAckHp]" << " "
+    //           << "node: " << Settings::ip_to_node_id(qp->sip) << "\t"
+    //           << "ack_seq: " << ack_seq << "\t"
+    //           << "lastUpdateSeq: " << qp->hp.m_lastUpdateSeq
+    //           << std::endl;
     if (ack_seq > qp->hp.m_lastUpdateSeq) {  // if full RTT feedback is ready, do full update
         UpdateRateHp(qp, p, ch, false);
     } else {  // do fast react
@@ -1434,57 +1439,40 @@ void RdmaHw::UpdateRateHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch
         IntHeader &ih = ch.ack.ih;
         NS_ASSERT(ih.nhop <= IntHeader::maxHop);
         for (uint32_t i = 0; i < ih.nhop; i++) qp->hp.hop[i] = ih.hop[i];
-#if PRINT_LOG
-        if (print) {
-            printf("%lu %s %08x %08x %u %u [%u,%u,%u]", Simulator::Now().GetTimeStep(),
-                   fast_react ? "fast" : "update", qp->sip.Get(), qp->dip.Get(), qp->sport,
-                   qp->dport, qp->hp.m_lastUpdateSeq, ch.ack.seq, next_seq);
-            for (uint32_t i = 0; i < ih.nhop; i++)
-                printf(" %u %lu %lu", ih.hop[i].GetQlen(), ih.hop[i].GetBytes(),
-                       ih.hop[i].GetTime());
-            printf("\n");
-        }
-#endif
         // for test the qlens
-        std::cout << "[UpdataRateHp]" << " "
-                  << "QP: " << Settings::ip_to_node_id(qp->sip) << "\t"
-                  << "Now Time: " << std::setprecision(3) << double(Simulator::Now().GetNanoSeconds() - 2000000000) / 1000000 << "ms"
-                  << std::endl;
-        for (int i = 0; i < ih.nhop; i++) {
-            std::cout << "[" << ""
-                      << std::setprecision(3)
-                      << double(ih.hop[i].GetTime() + 1996488704 - 2000000000) / 1000000 << "ms" << ", "
-                      << "Qlen: " << ih.hop[i].GetQlen() << ", "
-                      << "Bytes: " << ih.hop[i].GetBytes() << ""
-                      << "]"
-                      << std::endl;
-        }
+        // std::cout << "[UpdataRateHp]" << " "
+        //           << "QP: " << Settings::ip_to_node_id(qp->sip) << "\t"
+        //           << "Now Time: " << std::setprecision(3) << double(Simulator::Now().GetNanoSeconds() - 2000000000) / 1000000 << "ms"
+        //           << std::endl;
+        // for (int i = 0; i < ih.nhop; i++) {
+        //     std::cout << "[" << ""
+        //               << std::setprecision(3)
+        //               << double(ih.hop[i].GetTime() + 1996488704 - 2000000000) / 1000000 << "ms" << ", "
+        //               << "Qlen: " << ih.hop[i].GetQlen() << ", "
+        //               << "Bytes: " << ih.hop[i].GetBytes() << ""
+        //               << "]"
+        //               << std::endl;
+        // }
     } else {
         // check packet INT
         IntHeader &ih = ch.ack.ih;
         if (ih.nhop <= IntHeader::maxHop) {
             double max_c = 0;
             bool inStable = false;
-#if PRINT_LOG
-            if (print)
-                printf("%lu %s %08x %08x %u %u [%u,%u,%u]", Simulator::Now().GetTimeStep(),
-                       fast_react ? "fast" : "update", qp->sip.Get(), qp->dip.Get(), qp->sport,
-                       qp->dport, qp->hp.m_lastUpdateSeq, ch.ack.seq, next_seq);
-#endif
             // check each hop
-        std::cout << "[UpdataRateHp]" << " "
-                  << "QP: " << Settings::ip_to_node_id(qp->sip) << "\t"
-                  << "NowTime: " << std::setprecision(3) << double(Simulator::Now().GetNanoSeconds() - 2000000000) / 1000000 << "ms"
-                  << std::endl;
-        for (int i = 0; i < ih.nhop; i++) {
-            std::cout << "[" << " "
-                      << std::setprecision(3)
-                      << double(ih.hop[i].GetTime() + 1996488704 - 2000000000) / 1000000 << "ms" << ", "
-                      << "Qlen: " << ih.hop[i].GetQlen() << ", "
-                      << "Bytes: " << ih.hop[i].GetBytes() << ""
-                      << "]"
-                      << std::endl;
-        }
+            // std::cout << "[UpdataRateHp]" << " "
+            //           << "QP: " << Settings::ip_to_node_id(qp->sip) << "\t"
+            //           << "NowTime: " << std::setprecision(3) << double(Simulator::Now().GetNanoSeconds() - 2000000000) / 1000000 << "ms"
+            //           << std::endl;
+            // for (int i = 0; i < ih.nhop; i++) {
+            //     std::cout << "[" << " "
+            //               << std::setprecision(3)
+            //               << double(ih.hop[i].GetTime() + 1996488704 - 2000000000) / 1000000 << "ms" << ", "
+            //               << "Qlen: " << ih.hop[i].GetQlen() << ", "
+            //               << "Bytes: " << ih.hop[i].GetBytes() << ""
+            //               << "]"
+            //               << std::endl;
+            // }
             double U = 0;
             uint64_t dt = 0;
             bool updated[IntHeader::maxHop] = {false}, updated_any = false;
@@ -1628,17 +1616,35 @@ void RdmaHw::FastReactHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch)
     if (m_fast_react) UpdateRateHp(qp, p, ch, true);
 }
 
-void RdmaHw::UpdateGrantBytesHp(Ptr<RdmaQueuePair> qp){
+void RdmaHw::UpdateGrantBytesHp(Ptr<RdmaQueuePair> qp) {
     qp->hp.m_grantDone = false;
-    Time next_grant_time("1000ns");
-    uint64_t grantSize = uint64_t(double(qp->hp.m_grantRate.GetBitRate()) * next_grant_time.GetSeconds() / 8.0);
-    if (qp->IsWinBound()) grantSize = 0;
+    Time next_grant_time("10ns");
+    if (qp->IsWinBound()) {
+        Simulator::Schedule(next_grant_time, &RdmaHw::UpdateGrantBytesHp, this, qp);
+        return;
+    }
+    // uint64_t rest_win = qp->GetWin() - qp->GetOnTheFly();
+    uint64_t grantSize = uint64_t(qp->hp.m_grantRate.GetBitRate() * uint64_t(next_grant_time.GetNanoSeconds() / 8) * 1e-9);
     if (grantSize >= qp->hp.m_restGrantBytes) {
         grantSize = qp->hp.m_restGrantBytes;
     }
+    // grantSize = std::min(grantSize, rest_win);
     
     qp->hp.m_grantedBytes += grantSize; // 令牌桶令牌数
     qp->hp.m_restGrantBytes -= grantSize; // 剩余需要授权的HPCC令牌数
+
+    // std::cout << "[RdmaHw::UpdateGrantBytesHp] "
+    //           << "time: " << Simulator::Now().GetNanoSeconds() << " "
+    //           << "node: " << Settings::ip_to_node_id(qp->sip) << " "
+    //         //   << "NST: " << qp->m_nextAvail.GetNanoSeconds() << " "
+    //         //   << "cond2: " << cond2 << " "
+    //         //   << "cond_w: " << cond_w << " "
+    //           << "u: " << qp->hp.u << " "
+    //           << "addGrantSize: " << grantSize << " "
+    //           << "hpRestGrantBytes: " << qp->hp.m_restGrantBytes << " "
+    //           << "hp_gBytes: " << qp->hp.m_grantedBytes << " " 
+    //           << "homa_gBytes: " << qp->homa.m_grantedBytes << " "
+    //           << std::endl;
 
     // Trigger
     uint32_t nic_idx = GetNicIdxOfQp(qp);
@@ -1647,19 +1653,6 @@ void RdmaHw::UpdateGrantBytesHp(Ptr<RdmaQueuePair> qp){
 
     bool cond_w = !qp->IsWinBound();
     bool cond2 = (qp->GetBytesLeft() > 0 && cond_w);
-    
-    std::cout << "[RdmaHw::UpdateGrantBytesHp] "
-              << "time: " << Simulator::Now().GetNanoSeconds() << " "
-              << "node: " << Settings::ip_to_node_id(qp->sip) << " "
-            //   << "NST: " << qp->m_nextAvail.GetNanoSeconds() << " "
-            //   << "cond2: " << cond2 << " "
-            //   << "cond_w: " << cond_w << " "
-              << "u: " << qp->hp.u << " "
-              << "addGrantSize: " << grantSize << " "
-              << "hpRestGrantBytes: " << qp->hp.m_restGrantBytes << " "
-              << "hp_gBytes: " << qp->hp.m_grantedBytes << " " 
-              << "homa_gBytes: " << qp->homa.m_grantedBytes << " "
-              << std::endl;
 
     if (qp->restSendSize == 0) {
         return;

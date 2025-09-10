@@ -75,7 +75,7 @@ VAR_WIN {var_win}
 FAST_REACT {fast_react}
 MI_THRESH {mi}
 INT_MULTI {int_multi}
-GLOBAL_T 1
+GLOBAL_T 0
 U_TARGET 0.95
 MULTI_RATE 0
 SAMPLE_FEEDBACK 0
@@ -114,6 +114,7 @@ lb_modes = {
 
 topo2bdp = {
     "leaf_spine_128_100G_OS2": 104000,  # 2-tier -> all 100Gbps
+    "my_topology_OS2": 104000, # 2-tier -> all 100Gbps
     "fat_k8_100G_OS2": 156000,  # 3-tier -> all 100Gbps
 }
 
@@ -421,11 +422,15 @@ def main():
         ################################################################
         # NOTE: collect data except warm-up and cold-finish period
         queue_analysis_time_limit_begin = int(
-            flowgen_start_time * 1e9) + int(0.005 * 1e9)  # warmup
+            # flowgen_start_time * 1e9) + int(0.005 * 1e9)  # warmup
+        flowgen_start_time * 1e9)  # no warmup
         queue_analysistime_limit_end = int(flowgen_stop_time * 1e9)
         print("Analyzing output Queue...")
         print("python3 queueAnalysis.py -id {config_ID} -dir {dir} -sT {queue_analysis_time_limit_begin} -fT {queue_analysistime_limit_end} > /dev/null 2>&1".format(
             config_ID=config_ID, dir=os.getcwd(), queue_analysis_time_limit_begin=queue_analysis_time_limit_begin, queue_analysistime_limit_end=queue_analysistime_limit_end))
+        # os.system("python3 queueAnalysis.py -id {config_ID} -dir {dir} -sT {queue_analysis_time_limit_begin} -fT {queue_analysistime_limit_end} > /dev/null 2>&1".format(
+        #     config_ID=config_ID, dir=os.getcwd(), queue_analysis_time_limit_begin=queue_analysis_time_limit_begin, queue_analysistime_limit_end=queue_analysistime_limit_end,
+        #     monitoringInterval=sw_monitoring_interval))  # TODO: parameterize
         os.system("python3 queueAnalysis.py -id {config_ID} -dir {dir} -sT {queue_analysis_time_limit_begin} -fT {queue_analysistime_limit_end} > /dev/null 2>&1".format(
             config_ID=config_ID, dir=os.getcwd(), queue_analysis_time_limit_begin=queue_analysis_time_limit_begin, queue_analysistime_limit_end=queue_analysistime_limit_end,
             monitoringInterval=sw_monitoring_interval))  # TODO: parameterize

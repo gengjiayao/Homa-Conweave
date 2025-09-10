@@ -240,40 +240,72 @@ uint32_t flow_num;
  */
 // 全局：记录每个 node 的上／下行字节数
 std::map<uint32_t,uint64_t> nodeTxBytes, nodeRxBytes;
-std::map<uint32_t, uint64_t> nodeTotalTxBytes, nodeTotalRxBytes;
+std::map<uint32_t, int> activeFlowsCount;
 
 // 绑定到每个 NetDevice 上的 Tx 回调
 void NodeTx (Ptr<NetDevice> dev, Ptr<const Packet> p) {
-  uint32_t nodeId = dev->GetNode()->GetId();
-  nodeTxBytes[nodeId] += p->GetSize();
-//   nodeTotalTxBytes[nodeId] += p->GetSize();
+    uint32_t nodeId = dev->GetNode()->GetId();
+    if (activeFlowsCount.count(nodeId) && activeFlowsCount[nodeId] > 0) {
+        nodeTxBytes[nodeId] += p->GetSize();
+    }
 }
 
 // 绑定到每个 NetDevice 上的 Rx 回调
 void NodeRx (Ptr<NetDevice> dev, Ptr<const Packet> p) {
-  uint32_t nodeId = dev->GetNode()->GetId();
-  nodeRxBytes[nodeId] += p->GetSize();
-//   nodeTotalRxBytes[nodeId] += p->GetSize();
+    uint32_t nodeId = dev->GetNode()->GetId();
+    if (activeFlowsCount.count(nodeId) && activeFlowsCount[nodeId] > 0) {
+        nodeRxBytes[nodeId] += p->GetSize();
+    }
 }
 
 // 打印带宽函数，interval_ns 和第一次调度请在 main 里设置
 static const uint64_t interval_ns = 100; // 100ns
 
 void PrintBw(FILE* outFile) {
-  double interval_s = double (interval_ns) * 1e-9;
-  fprintf(outFile, "=== FlowMonitor @ %ld ns ===\n", Simulator::Now().GetNanoSeconds());
-  for (auto &kv : nodeTxBytes) {
-    uint32_t id = kv.first;
-    double txGbps = kv.second * 8.0 / interval_s / 1e9;
-    double rxGbps = nodeRxBytes[id] * 8.0 / interval_s / 1e9;
-    fprintf(outFile, "%d\t\tTx=%.2lf Gbps\t\tRx=%.2lf Gbps\n", id, txGbps, rxGbps);
-    // 重置
-    kv.second = 0;
-    nodeRxBytes[id] = 0;
-  }
-  fprintf(outFile, "\n");
-  // 再次调度
-  Simulator::Schedule (NanoSeconds (interval_ns), &PrintBw, outFile);
+    double interval_s = double (interval_ns) * 1e-9;
+    fprintf(outFile, "=== FlowMonitor @ %ld ns ===\n", Simulator::Now().GetNanoSeconds());
+
+    bool anyNodeIsActive = false;
+
+    for (const auto& pair : activeFlowsCount) {
+        uint32_t nodeId = pair.first;
+        int count = pair.second;
+        
+        if (count > 0) {
+            anyNodeIsActive = true;
+
+            double txBytes = nodeTxBytes[nodeId];
+            double rxBytes = nodeRxBytes[nodeId];
+
+            double txGbps = (txBytes * 8.0) / interval_s / 1e9;
+            double rxGbps = (rxBytes * 8.0) / interval_s / 1e9;
+            
+            // 打印该节点的信息，即使 txGbps 和 rxGbps 都是 0。
+            fprintf(outFile, "%d\t\tTx=%.2lf Gbps\t\tRx=%.2lf Gbps\n", nodeId, txGbps, rxGbps);
+        }
+    }
+
+    // for (auto &kv : nodeTxBytes) {
+    //     uint32_t id = kv.first;
+    //     double txGbps = kv.second * 8.0 / interval_s / 1e9;
+    //     double rxGbps = nodeRxBytes[id] * 8.0 / interval_s / 1e9;
+    //     fprintf(outFile, "%d\t\tTx=%.2lf Gbps\t\tRx=%.2lf Gbps\n", id, txGbps, rxGbps);
+    //     // 重置
+    //     kv.second = 0;
+    //     nodeRxBytes[id] = 0;
+    // }
+    // fprintf(outFile, "\n");
+    // // 再次调度
+    // Simulator::Schedule (NanoSeconds (interval_ns), &PrintBw, outFile);
+
+    fprintf(outFile, "\n");
+
+    nodeTxBytes.clear();
+    nodeRxBytes.clear();
+
+    if (!Simulator::IsFinished()) {
+        Simulator::Schedule(NanoSeconds(interval_ns), &PrintBw, outFile);
+    }
 }
 
 /**
@@ -550,6 +582,12 @@ void conweave_history_print() {
  */
 void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
     uint32_t sid = Settings::ip_to_node_id(q->sip), did = Settings::ip_to_node_id(q->dip);
+
+    // 用于打印BW
+    if (activeFlowsCount.count(sid)) {
+        activeFlowsCount[sid]--;
+    }
+
     uint64_t base_rtt = pairRtt[n.Get(sid)][n.Get(did)];
     uint64_t b = pairBw[n.Get(sid)][n.Get(did)];
     uint32_t total_bytes =
@@ -1463,7 +1501,7 @@ int main(int argc, char *argv[]) {
     // manually type BDP
     std::map<std::string, uint32_t> topo2bdpMap;
     topo2bdpMap[std::string("leaf_spine_128_100G_OS2")] = 104000;  // RTT=8320
-    // topo2bdpMap[std::string("leaf_spine_128_100G_OS2")] = 78000;
+    topo2bdpMap[std::string("my_topology_OS2")] = 104000;
     topo2bdpMap[std::string("fat_k8_100G_OS2")] = 156000;      // RTT=12480 --> all 100G links
 
     // topology_file
@@ -1536,6 +1574,15 @@ int main(int argc, char *argv[]) {
 
             node->AggregateObject(rdma);
             rdma->Init();
+
+            // 用于打印BW
+            uint32_t nodeId = node->GetId();
+            if (activeFlowsCount.find(nodeId) == activeFlowsCount.end()) {
+                activeFlowsCount[nodeId] = 1;
+            } else {
+                activeFlowsCount[nodeId]++;
+            }
+
             rdma->TraceConnectWithoutContext("QpComplete",
                                              MakeBoundCallback(qp_finish, fct_output));
         }
