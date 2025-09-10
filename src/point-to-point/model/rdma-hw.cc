@@ -251,15 +251,15 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
             for (uint32_t i = 0; i < IntHeader::maxHop; i++) qp->hp.hopState[i].Rc = m_bps;
         }
         qp->hp.m_grantRate = m_bps; // 初始化带宽 100Gbps
-        const uint64_t hp_init_grantedBytes = win; // 初始化HPCC授权12500 (1000ns满带宽)
+        const uint64_t hp_init_grantedBytes = 12500; // 初始化HPCC授权12500 (1000ns满带宽)
         qp->hp.m_grantedBytes = hp_init_grantedBytes > size ? size : hp_init_grantedBytes;
         qp->hp.m_restGrantBytes = size > qp->hp.m_grantedBytes ? size - qp->hp.m_grantedBytes : 0;
-        Time next_grant_time("10ns");
+        Time next_grant_time("1000ns");
         Simulator::Schedule(next_grant_time, &RdmaHw::UpdateGrantBytesHp, this, qp);
         
         // HOMA控制
         qp->homa.m_enabled = true; // 设定homa拥塞控制
-        qp->homa.m_init_grantedBytes = win;
+        qp->homa.m_init_grantedBytes = 10000;
         qp->homa.m_grantedBytes = qp->homa.m_init_grantedBytes < size ? qp->homa.m_init_grantedBytes : size; // 设定初始令牌桶令牌数
         qp->homa.m_fly_grant_bytes = size - qp->homa.m_grantedBytes; // 设定未到达发送方的授权包字节数
     }
@@ -1618,16 +1618,14 @@ void RdmaHw::FastReactHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch)
 
 void RdmaHw::UpdateGrantBytesHp(Ptr<RdmaQueuePair> qp) {
     qp->hp.m_grantDone = false;
-    Time next_grant_time("10ns");
-    if (qp->IsWinBound()) {
-        Simulator::Schedule(next_grant_time, &RdmaHw::UpdateGrantBytesHp, this, qp);
-        return;
-    }
+    Time next_grant_time("1000ns");
     // uint64_t rest_win = qp->GetWin() - qp->GetOnTheFly();
     uint64_t grantSize = uint64_t(qp->hp.m_grantRate.GetBitRate() * uint64_t(next_grant_time.GetNanoSeconds() / 8) * 1e-9);
+    if (qp->IsWinBound()) grantSize = 0;
     if (grantSize >= qp->hp.m_restGrantBytes) {
         grantSize = qp->hp.m_restGrantBytes;
     }
+
     // grantSize = std::min(grantSize, rest_win);
     
     qp->hp.m_grantedBytes += grantSize; // 令牌桶令牌数
