@@ -1621,6 +1621,7 @@ void RdmaHw::UpdateGrantBytesHp(Ptr<RdmaQueuePair> qp) {
     Time next_grant_time("1000ns");
     // uint64_t rest_win = qp->GetWin() - qp->GetOnTheFly();
     uint64_t grantSize = uint64_t(qp->hp.m_grantRate.GetBitRate() * uint64_t(next_grant_time.GetNanoSeconds() / 8) * 1e-9);
+    grantSize = grantSize == 0 ? 1 : grantSize;
     if (qp->IsWinBound()) grantSize = 0;
     if (grantSize >= qp->hp.m_restGrantBytes) {
         grantSize = qp->hp.m_restGrantBytes;
