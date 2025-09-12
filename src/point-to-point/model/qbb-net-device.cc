@@ -152,7 +152,6 @@ int RdmaEgressQueue::GetNextQindex(bool paused[]) {
                   << std::endl;
         
         // qp->trans_tag = 2;
-        qp->trans_tag = -1;
         
         // 没有要发的了，并且还没被记录成完成的，进入qp完成逻辑，homa条件下一样适用
         if (!cond2 && !m_qpGrp->IsQpFinished((qIndex + m_rrlast) % fcount)) {
