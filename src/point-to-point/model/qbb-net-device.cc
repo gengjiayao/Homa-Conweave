@@ -119,25 +119,29 @@ int RdmaEgressQueue::GetNextQindex(bool paused[]) {
         
         bool cond2 = (qp->GetBytesLeft() > 0 && cond_window_allowed); // cond2表示当前有没有剩余size没发
         
-        bool is_homa = qp->homa.m_enabled; // homa是否启用
-        bool is_homa_hpcc = qp->hp.m_homa_hpcc; // homa+hpcc是否同时启用
+        bool is_homa = qp->homa.m_enabled; // homa is enable
+        bool is_homa_hpcc = qp->hp.m_homa_hpcc; // homa_hpcc is enable
 
-        // std::cout << "[RdmaEgressQueue::GetNextQindex] "
-        //           << "time: " << Simulator::Now().GetNanoSeconds() << " "
-        //         //   << "next_time: " << qp->m_nextAvail.GetNanoSeconds() << " "
-        //           << "node: " << Settings::ip_to_node_id(qp->sip) << " "
-        //           << "hp_gBytes: " << qp->hp.m_grantedBytes << " "
-        //           << "homa_gBytes: " << qp->homa.m_grantedBytes << " "
-        //           << "fly: " << qp->GetOnTheFly() << " "
-        //         //   << "restSendSize: " << qp->restSendSize << " "
-        //         //   << "hpccRestGrantSize: " << qp->hp.m_restGrantBytes << " "
-        //           << "hp_rate: " << (double)qp->hp.m_grantRate.GetBitRate() / 1000000000  << " "
-        //           << "u: " << qp->hp.u << " "
-        //           << "homa_fly_gBytes: " << qp->homa.m_fly_grant_bytes << " "
-        //         //   << "win: " << qp->GetWin() << " "
-        //         //   << "cond1: " << cond1 << " " << "cond2: " << cond2 << " " 
-        //         //   << "cond_w: " << cond_window_allowed << " "
-        //           << std::endl;
+        qp->UpdateGrantBytesHPCC(m_mtu); // compute hpcc grant bytes
+
+        std::cout << "[RdmaEgressQueue::GetNextQindex] "
+                  << "time: " << Simulator::Now().GetNanoSeconds() << " "
+                //   << "next_time: " << qp->m_nextAvail.GetNanoSeconds() << " "
+                  << "node: " << Settings::ip_to_node_id(qp->sip) << " "
+                  << "to: " << Settings::ip_to_node_id(qp->dip) << " "
+                  << "hp_gBytes: " << qp->hp.m_grantedBytes << " "
+                  << "homa_gBytes: " << qp->homa.m_grantedBytes << " "
+                  << "fly: " << qp->GetOnTheFly() << " "
+                  << "restSendSize: " << qp->restSendSize << " "
+                  << "hpccRestGrantSize: " << qp->hp.m_restGrantBytes << " "
+                  << "homa_again: " << qp->homa.m_request_again << " "
+                //   << "hp_rate: " << (double)qp->hp.m_grantRate.GetBitRate() / 1000000000  << " "
+                //   << "u: " << qp->hp.u << " "
+                  << "homa_fly_gBytes: " << qp->homa.m_fly_grant_bytes << " "
+                //   << "win: " << qp->GetWin() << " "
+                //   << "cond1: " << cond1 << " " << "cond2: " << cond2 << " " 
+                //   << "cond_w: " << cond_window_allowed << " "
+                  << std::endl;
         
         // 没有要发的了，并且还没被记录成完成的，进入qp完成逻辑，homa条件下一样适用
         if (!cond2 && !m_qpGrp->IsQpFinished((qIndex + m_rrlast) % fcount)) {

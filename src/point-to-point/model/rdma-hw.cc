@@ -219,6 +219,10 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
     qp->m_rate = m_bps;
     qp->m_max_rate = m_bps;
 
+    // Set QbbDevice
+    Ptr<QbbNetDevice> target_device = m_nic[nic_idx].dev;
+    qp->SetDevice(&(*target_device));
+
     // 初始化为不开启
     qp->hp.m_homa_hpcc = false;
     qp->homa.m_enabled = false;
@@ -250,17 +254,17 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
         if (m_multipleRate) {
             for (uint32_t i = 0; i < IntHeader::maxHop; i++) qp->hp.hopState[i].Rc = m_bps;
         }
-        qp->hp.m_grantRate = m_bps; // 初始化带宽 100Gbps
-        const uint64_t hp_init_grantedBytes = win; // 初始化HPCC授权12500 (1000ns满带宽)
-        qp->hp.m_grantedBytes = hp_init_grantedBytes > size ? size : hp_init_grantedBytes;
-        qp->hp.m_restGrantBytes = size > qp->hp.m_grantedBytes ? size - qp->hp.m_grantedBytes : 0;
-        Time next_grant_time("10ns");
-        Simulator::Schedule(next_grant_time, &RdmaHw::UpdateGrantBytesHp, this, qp);
-        
+        qp->hp.m_grantRate = m_bps;
+        const uint64_t hp_init_grantedBytes = 999;
+        qp->hp.m_grantedBytes = std::min(size, hp_init_grantedBytes);
+        qp->hp.m_restGrantBytes = size - qp->hp.m_grantedBytes;
+        qp->hp.m_lastGrantRate = qp->hp.m_grantRate;
+        qp->hp.m_lastTime = Simulator::Now();
+
         // HOMA控制
         qp->homa.m_enabled = true; // 设定homa拥塞控制
         qp->homa.m_init_grantedBytes = win;
-        qp->homa.m_grantedBytes = qp->homa.m_init_grantedBytes < size ? qp->homa.m_init_grantedBytes : size; // 设定初始令牌桶令牌数
+        qp->homa.m_grantedBytes = std::min(size, qp->homa.m_init_grantedBytes); // 设定初始令牌桶令牌数
         qp->homa.m_fly_grant_bytes = size - qp->homa.m_grantedBytes; // 设定未到达发送方的授权包字节数
     }
     
@@ -553,16 +557,21 @@ int RdmaHw::ReceiveHoma(Ptr<Packet> p, CustomHeader &ch) {
 
     // std::cout << "[ReceiveHoma]" << " " << Settings::ip_to_node_id(qp->sip) << std::endl;
 
+    qp->homa.m_request_again_bytes += qp->homa.m_grantedBytes;
     uint32_t grant_bytes = ch.ack.homa_grant_bytes;
-    qp->homa.m_grantedBytes += grant_bytes; // 增加令牌数
+
+    qp->homa.m_grantedBytes = grant_bytes; // overwrite grant bytes
     qp->homa.m_fly_grant_bytes -= grant_bytes; // 等待授权的令牌数减少
+    if (qp->homa.m_request_again_bytes != 0) {
+        qp->homa.m_request_again = true;
+    }
 
-    // 找到qp对应的设备节点
-    uint32_t nic_idx = GetNicIdxOfQp(qp);
-    Ptr<QbbNetDevice> dev = m_nic[nic_idx].dev;
-
-    // 被授权之后就可以继续发送了
-    dev->TriggerTransmit();
+    // past time is homa bound.
+    if (qp->is_homa_bound) {
+        uint32_t nic_idx = GetNicIdxOfQp(qp);
+        Ptr<QbbNetDevice> dev = m_nic[nic_idx].dev;
+        dev->TriggerTransmit();
+    }
     return 0;
 }
 
@@ -1058,9 +1067,7 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
         payload_size = qp->GetBytesLeft();
     }
 
-    if (m_mtu < payload_size) {  // possibly last packet
-        payload_size = m_mtu;
-    }
+    payload_size = std::min(m_mtu, payload_size);
 
     qp->restSendSize -= payload_size;
 
@@ -1069,7 +1076,7 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
     qp->stat.txTotalPkts += 1;
     qp->stat.txTotalBytes += payload_size;
     
-    Ptr<Packet> p = Create<Packet>(payload_size); // 创建一定大小的数据
+    Ptr<Packet> p = Create<Packet>(payload_size);
     // add SeqTsHeader
     SeqTsHeader seqTs;
     seqTs.SetSeq(seq);
@@ -1082,9 +1089,10 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
         homa_flag = 1;
         qp->homa.m_was_request = true;
     } else if (qp->homa.m_enabled && qp->homa.m_was_request && qp->homa.m_request_again) {
+        qp->homa.m_fly_grant_bytes += qp->homa.m_request_again_bytes;
         homa_flag = qp->homa.m_request_again_bytes;
-        qp->homa.m_fly_grant_bytes += qp->homa.m_request_again_bytes; // 增加需要等待的令牌数 
         qp->homa.m_request_again = false;
+        qp->homa.m_request_again_bytes = 0;
 
         std::cout << "[HOMA request send again]" << " "
                   << Simulator::Now().GetNanoSeconds() << "\t"
@@ -1156,32 +1164,8 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
         if (m_cc_mode == 9) {
             qp->homa.m_grantedBytes -= payload_size;
         } else if (m_cc_mode == 10) {
-            // 拉平令牌桶数量,为了快速相应
             qp->homa.m_grantedBytes -= payload_size;
             qp->hp.m_grantedBytes -= payload_size;
-            
-            // homa 向 hpcc 对齐（阈值对齐）
-            const int margin = 20000; // 一次授权12000，这个值应该大于12000
-            if (qp->homa.m_grantedBytes > qp->hp.m_grantedBytes + margin) {
-                uint64_t avail_gBytes = qp->homa.m_grantedBytes - qp->hp.m_grantedBytes;
-                // 重新请求HOMA
-                qp->homa.m_request_again = true;
-                qp->homa.m_request_again_bytes = avail_gBytes;
-                qp->homa.m_grantedBytes = qp->hp.m_grantedBytes; 
-                std::cout << "[HOMA request again]" << " "
-                          << Settings::ip_to_node_id(qp->sip) << " -> "
-                          << Settings::ip_to_node_id(qp->dip) << " "
-                          << qp->homa.m_request_again_bytes << " bytes"
-                          << std::endl;
-            }
-
-            // hpcc 向 homa 对齐（立即对齐）
-            if (qp->homa.m_grantedBytes < qp->hp.m_grantedBytes) {
-                uint64_t avail_gBytes = qp->hp.m_grantedBytes - qp->homa.m_grantedBytes;
-                qp->hp.m_grantedBytes = qp->homa.m_grantedBytes;
-                qp->hp.m_restGrantBytes += avail_gBytes;
-            }
-
         }
     }
 
@@ -1614,49 +1598,6 @@ void RdmaHw::UpdateRateHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch
 
 void RdmaHw::FastReactHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch) {
     if (m_fast_react) UpdateRateHp(qp, p, ch, true);
-}
-
-void RdmaHw::UpdateGrantBytesHp(Ptr<RdmaQueuePair> qp) {
-    qp->hp.m_grantDone = false;
-    Time next_grant_time("10ns");
-    if (qp->IsWinBound()) {
-        Simulator::Schedule(next_grant_time, &RdmaHw::UpdateGrantBytesHp, this, qp);
-        return;
-    }
-    // uint64_t rest_win = qp->GetWin() - qp->GetOnTheFly();
-    uint64_t grantSize = uint64_t(qp->hp.m_grantRate.GetBitRate() * uint64_t(next_grant_time.GetNanoSeconds() / 8) * 1e-9);
-    if (grantSize >= qp->hp.m_restGrantBytes) {
-        grantSize = qp->hp.m_restGrantBytes;
-    }
-    // grantSize = std::min(grantSize, rest_win);
-    
-    qp->hp.m_grantedBytes += grantSize; // 令牌桶令牌数
-    qp->hp.m_restGrantBytes -= grantSize; // 剩余需要授权的HPCC令牌数
-
-    // std::cout << "[RdmaHw::UpdateGrantBytesHp] "
-    //           << "time: " << Simulator::Now().GetNanoSeconds() << " "
-    //           << "node: " << Settings::ip_to_node_id(qp->sip) << " "
-    //         //   << "NST: " << qp->m_nextAvail.GetNanoSeconds() << " "
-    //         //   << "cond2: " << cond2 << " "
-    //         //   << "cond_w: " << cond_w << " "
-    //           << "u: " << qp->hp.u << " "
-    //           << "addGrantSize: " << grantSize << " "
-    //           << "hpRestGrantBytes: " << qp->hp.m_restGrantBytes << " "
-    //           << "hp_gBytes: " << qp->hp.m_grantedBytes << " " 
-    //           << "homa_gBytes: " << qp->homa.m_grantedBytes << " "
-    //           << std::endl;
-
-    // Trigger
-    uint32_t nic_idx = GetNicIdxOfQp(qp);
-    Ptr<QbbNetDevice> dev = m_nic[nic_idx].dev;
-    dev->TriggerTransmit();
-
-    bool cond_w = !qp->IsWinBound();
-    bool cond2 = (qp->GetBytesLeft() > 0 && cond_w);
-
-    if (qp->restSendSize == 0) {
-        return;
-    } else Simulator::Schedule(next_grant_time, &RdmaHw::UpdateGrantBytesHp, this, qp);
 }
 
 /**********************
