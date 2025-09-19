@@ -369,7 +369,6 @@ void RdmaHw::SendGrantPacket(const curFlowId& flowId, DataRate rate) {
     seqh.SetDport(flowId.dport);
     uint64_t grant_val = rate.GetBitRate() / 1000000;
     seqh.SetHomaGrantedBytes(grant_val);
-    std::cout << "[SendGrantPacket] Time: " << Simulator::Now().GetSeconds() << "s, Setting grant_val: " << grant_val << " (Mbps)" << std::endl;
 
     Ptr<Packet> newp = Create<Packet>(std::max(60 - 14 - 20 - (int)seqh.GetSerializedSize(), 0));
     newp->AddHeader(seqh);
@@ -516,7 +515,14 @@ int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
     }
 
     if (ch.udp.homa_flag != 0) {
-        HandleHomaRequest(p, ch);
+        uint32_t flow_size = 0;
+        FlowIDNUMTag fit;
+        if (p->PeekPacketTag(fit)) {
+            flow_size = fit.GetFlowSize();
+        }
+        if (flow_size > 104000) {
+            HandleHomaRequest(p, ch);
+        }
     }
 
     if (IsFlowCompleted(rxQp, p, ch)) {
@@ -949,7 +955,8 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
 
     // set homa_flag
     uint32_t homa_flag = 0;
-    if (qp->homa.m_enable) {
+    if (qp->homa.m_enable && !qp->homa.m_homa_is_running) {
+        qp->homa.m_homa_is_running = true;
         homa_flag = 1;
     }
     seqTs.SetHomaFlag(homa_flag); // for homa_flag

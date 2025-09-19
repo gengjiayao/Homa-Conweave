@@ -405,10 +405,11 @@ def main():
     #                 Analyze the output FCT           #
     ####################################################
     # NOTE: collect data except warm-up and cold-finish period
-    fct_analysis_time_limit_begin = int(
-        flowgen_start_time * 1e9) + int(0.005 * 1e9)  # warmup
-    fct_analysistime_limit_end = int(
-        flowgen_stop_time * 1e9) + int(0.05 * 1e9)  # extra term
+    # fct_analysis_time_limit_begin = int(
+    #     flowgen_start_time * 1e9) + int(0.005 * 1e9)  # warmup
+    fct_analysis_time_limit_begin = int(flowgen_start_time * 1e9)
+    # fct_analysistime_limit_end = int(flowgen_stop_time * 1e9) + int(0.05 * 1e9)  # extra term
+    fct_analysistime_limit_end = int(flowgen_stop_time * 1e9)
 
     print("Analyzing output FCT...")
     print("python3 fctAnalysis.py -id {config_ID} -dir {dir} -bdp {bdp} -sT {fct_analysis_time_limit_begin} -fT {fct_analysistime_limit_end} > /dev/null 2>&1".format(
@@ -428,6 +429,9 @@ def main():
         print("Analyzing output Queue...")
         print("python3 queueAnalysis.py -id {config_ID} -dir {dir} -sT {queue_analysis_time_limit_begin} -fT {queue_analysistime_limit_end} > /dev/null 2>&1".format(
             config_ID=config_ID, dir=os.getcwd(), queue_analysis_time_limit_begin=queue_analysis_time_limit_begin, queue_analysistime_limit_end=queue_analysistime_limit_end))
+        # os.system("python3 queueAnalysis.py -id {config_ID} -dir {dir} -sT {queue_analysis_time_limit_begin} -fT {queue_analysistime_limit_end} > /dev/null 2>&1".format(
+        #     config_ID=config_ID, dir=os.getcwd(), queue_analysis_time_limit_begin=queue_analysis_time_limit_begin, queue_analysistime_limit_end=queue_analysistime_limit_end,
+        #     monitoringInterval=sw_monitoring_interval))  # TODO: parameterize
         # os.system("python3 queueAnalysis.py -id {config_ID} -dir {dir} -sT {queue_analysis_time_limit_begin} -fT {queue_analysistime_limit_end} > /dev/null 2>&1".format(
         #     config_ID=config_ID, dir=os.getcwd(), queue_analysis_time_limit_begin=queue_analysis_time_limit_begin, queue_analysistime_limit_end=queue_analysistime_limit_end,
         #     monitoringInterval=sw_monitoring_interval))  # TODO: parameterize

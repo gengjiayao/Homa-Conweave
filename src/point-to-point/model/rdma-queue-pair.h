@@ -82,6 +82,7 @@ class RdmaQueuePair : public Object {
     
     struct {
         bool m_enable = false;
+        bool m_homa_is_running = false; // runtime state to indicate if homa is running
         DataRate m_curRate;
     } homa;
     struct {
