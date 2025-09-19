@@ -520,8 +520,8 @@ int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
         if (p->PeekPacketTag(fit)) {
             flow_size = fit.GetFlowSize();
         }
-        if (flow_size > 104000) {
-            HandleHomaRequest(p, ch);
+        if (flow_size > 2 * 104000) {
+            HandleHomaRequest(p, ch);   
         }
     }
 

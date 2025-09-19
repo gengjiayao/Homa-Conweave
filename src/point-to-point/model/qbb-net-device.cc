@@ -120,18 +120,18 @@ int RdmaEgressQueue::GetNextQindex(bool paused[]) {
         bool is_homa = qp->homa.m_enable; // homa is enable
         bool is_hpcc = qp->hp.m_enable; // homa_hpcc is enable
 
-        std::cout << "[RdmaEgressQueue::GetNextQindex] "
-                  << "time: " << Simulator::Now().GetNanoSeconds() << " "
-                //   << "next_time: " << qp->m_nextAvail.GetNanoSeconds() << " "
-                  << "node: " << Settings::ip_to_node_id(qp->sip) << " "
-                  << "to: " << Settings::ip_to_node_id(qp->dip) << " "
-                //   << "fly: " << qp->GetOnTheFly() << " "
-                //   << "restSendSize: " << qp->restSendSize << " "
-                  << "hp_rate: " << (double)qp->hp.m_curRate.GetBitRate() / 1000000000  << " "
-                  << "homa_rate: " << (double)qp->homa.m_curRate.GetBitRate() / 1000000000  << " "
-                //   << "u: " << qp->hp.u << " "
-                //   << "win: " << qp->GetWin() << " "
-                  << std::endl;
+        // std::cout << "[RdmaEgressQueue::GetNextQindex] "
+        //           << "time: " << Simulator::Now().GetNanoSeconds() << " "
+        //         //   << "next_time: " << qp->m_nextAvail.GetNanoSeconds() << " "
+        //           << "node: " << Settings::ip_to_node_id(qp->sip) << " "
+        //           << "to: " << Settings::ip_to_node_id(qp->dip) << " "
+        //         //   << "fly: " << qp->GetOnTheFly() << " "
+        //         //   << "restSendSize: " << qp->restSendSize << " "
+        //           << "hp_rate: " << (double)qp->hp.m_curRate.GetBitRate() / 1000000000  << " "
+        //           << "homa_rate: " << (double)qp->homa.m_curRate.GetBitRate() / 1000000000  << " "
+        //         //   << "u: " << qp->hp.u << " "
+        //         //   << "win: " << qp->GetWin() << " "
+        //           << std::endl;
         
         // don't have rest bytes but not set qp_finish: waiting for ack
         if (!cond2 && !m_qpGrp->IsQpFinished((qIndex + m_rrlast) % fcount)) {
@@ -533,7 +533,6 @@ void QbbNetDevice::UpdateNextAvail(Time t) {
     if (!m_nextSend.IsExpired() && t < m_nextSend.GetTs()) {
         Simulator::Cancel(m_nextSend);
         Time delta = t < Simulator::Now() ? Time(0) : t - Simulator::Now();
-        std::cout << "[QbbNetDevice::UpdateNextAvail] Node " << this->GetNode()->GetId() << " Update next send time: " << t.GetNanoSeconds() << " delta: " << delta.GetNanoSeconds() << std::endl;
         m_nextSend = Simulator::Schedule(delta, &QbbNetDevice::DequeueAndTransmit, this);
     }
 }
