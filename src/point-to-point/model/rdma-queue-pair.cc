@@ -17,41 +17,6 @@ namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE("RdmaQueuePair");
 
-void RdmaQueuePair::UpdateGrantBytesHPCC(uint32_t mtu) {
-    Time deltaTime = Simulator::Now() - hp.m_lastTime;
-    uint64_t grantSize = uint64_t(hp.m_lastGrantRate.GetBitRate() * uint64_t(deltaTime.GetNanoSeconds() / 8) * 1e-9);
-
-    grantSize = std::max(grantSize, uint64_t(1)); // 至少是1个
-    grantSize = std::min(grantSize, hp.m_restGrantBytes); // 流上限
-    grantSize = std::min(grantSize, std::max(GetWin() - hp.m_grantedBytes, uint64_t(0))); // 令牌桶上限
-
-    if (IsWinBound() && hp.m_grantedBytes > GetWin()) {
-        uint64_t tmp = hp.m_grantedBytes - GetWin();
-        hp.m_grantedBytes = GetWin();
-        hp.m_restGrantBytes += tmp;
-    } else {
-        hp.m_grantedBytes += grantSize; // 放令牌
-        hp.m_restGrantBytes -= grantSize; // 更新剩余需要授权数
-    }
-
-    // update v and t
-    hp.m_lastGrantRate = hp.m_grantRate;
-    hp.m_lastTime = Simulator::Now();
-
-    is_hpcc_bound = hp.m_grantedBytes < mtu && restSendSize != 0;
-    is_homa_bound = homa.m_grantedBytes < mtu && restSendSize != 0;
-    
-    if (is_hpcc_bound) {
-        Time trigger = NanoSeconds(std::ceil(hp.m_grantRate.CalculateTxTime(mtu - hp.m_grantedBytes) * 1e9));
-        hp.m_hpccBoundTriggerEvent = Simulator::Schedule(trigger, &QbbNetDevice::TriggerTransmit, m_device);
-    } else {
-        if (hp.m_hpccBoundTriggerEvent.IsRunning()) {
-            Simulator::Cancel(hp.m_hpccBoundTriggerEvent);
-            hp.m_hpccBoundTriggerEvent = EventId(); // set null
-        }
-    }
-}
-
 /**************************
  * RdmaQueuePair
  *************************/
@@ -181,11 +146,7 @@ uint64_t RdmaQueuePair::GetWin() {
     if (m_win == 0) return 0;
     uint64_t w;
     if (m_var_win) {
-        if (homa.m_enabled && hp.m_homa_hpcc) {
-            w = m_win * hp.m_grantRate.GetBitRate() / m_max_rate.GetBitRate();
-        } else {
-            w = m_win * m_rate.GetBitRate() / m_max_rate.GetBitRate();
-        }
+        w = m_win * m_rate.GetBitRate() / m_max_rate.GetBitRate();
         if (w == 0) w = 1;  // must > 0
     } else {
         w = m_win;

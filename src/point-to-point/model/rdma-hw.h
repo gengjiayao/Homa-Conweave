@@ -8,8 +8,8 @@
 
 #include <cstdint>
 #include <unordered_map>
-#include <unordered_set>
 #include <functional>
+#include <list>
 
 #include "ns3/ipv4-address.h"
 #include "ns3/settings.h"
@@ -26,205 +26,42 @@ struct RdmaInterfaceMgr {
     RdmaInterfaceMgr(Ptr<QbbNetDevice> _dev) { dev = _dev; }
 };
 
-enum class QueueType {
-    NONE,
-    HIGH_PRIORITY,
-    FAIR
-};
-
-struct FlowState {
+struct curFlowId {
+    uint32_t src_ip;
+    uint32_t dst_ip;
     uint16_t sport;
     uint16_t dport;
     uint16_t priority;
-    uint32_t src_ip;
-    uint32_t dst_ip;
-    uint32_t remaining_bytes;
-    Time last_send_time;
 
-    QueueType current_queue = QueueType::NONE; // 在非公平homa中为NONE
-    
-    bool operator < (const FlowState& other) const {
-        return (priority != other.priority) ? 
-               (priority < other.priority) : (remaining_bytes > other.remaining_bytes);
-    }
+    bool operator==(const curFlowId& other) const;
 };
 
-struct FlowKey {
-    uint32_t src_ip;
-    uint32_t dst_ip;
-    uint16_t sport;
-    uint16_t dport;
-
-    FlowKey(uint32_t s_ip, uint32_t d_ip, uint16_t s_port, uint16_t d_port)
-        : src_ip(s_ip), dst_ip(d_ip), sport(s_port), dport(d_port) {}
-
-    bool operator==(const FlowKey& other) const {
-        return src_ip == other.src_ip && dst_ip == other.dst_ip &&
-               sport == other.sport && dport == other.dport;
-    }
+struct FlowIdHasher {
+    std::size_t operator()(const curFlowId& k) const;
 };
 
-struct FlowKeyHasher {
-    std::size_t operator()(const FlowKey& k) const {
-        std::size_t h1 = std::hash<uint32_t>()(k.src_ip);
-        std::size_t h2 = std::hash<uint32_t>()(k.dst_ip);
-        std::size_t h3 = std::hash<uint16_t>()(k.sport);
-        std::size_t h4 = std::hash<uint16_t>()(k.dport);
-        return h1 ^ (h2 << 1) ^ (h3 << 2) ^ (h4 << 3);
-    }
+struct FlowData {
+    uint32_t remainingBytes;
+    Time lastSendTime;
 };
 
-class FlowScheduler {
+class FairScheduler {
 public:
-    FlowScheduler() : high_priority_queue_comparator(flow_map), 
-                      high_priority_queue(high_priority_queue_comparator) {}
+    FairScheduler();
+    ~FairScheduler();
 
-    void add_or_update_flow(const FlowState& flow_data) {
-        FlowKey key(flow_data.src_ip, flow_data.dst_ip, flow_data.sport, flow_data.dport);
-        
-        auto it = flow_map.find(key);
-
-        if (it == flow_map.end()) {
-            if (flow_data.remaining_bytes == 0) return;
-            flow_map[key] = flow_data;
-            FlowState& new_flow = flow_map.at(key);
-            requeue_flow(key, new_flow);
-        } else {
-            uint32_t bytes_to_add = flow_data.remaining_bytes;
-            if (bytes_to_add == 0) return;
-            update_remaining_bytes(key, bytes_to_add);
-        }
-    }
-    
-    void update_remaining_bytes(const FlowKey& key, int bytes_to_add) {
-        auto it = flow_map.find(key);
-        if (it == flow_map.end()) {
-            return;
-        }
-
-        FlowState& flow = it->second;
-        
-        // 计算状态
-        uint32_t old_bytes = flow.remaining_bytes;
-        uint32_t new_bytes = old_bytes + bytes_to_add;
-        
-        std::cout << "[Update HOMA remaining bytes]" << " "
-                  << Settings::ip_to_node_id(Ipv4Address(key.dst_ip)) << " -> "
-                  << Settings::ip_to_node_id(Ipv4Address(key.src_ip)) << "\t"
-                  << old_bytes << "->"
-                  << new_bytes << "\t"
-                  << std::endl;
-
-        bool was_in_high_priority = (old_bytes <= flow_threshold);
-        bool is_now_in_high_priority = (new_bytes <= flow_threshold);
-
-        if (was_in_high_priority == is_now_in_high_priority) {
-            // 队列类型没变
-            if (was_in_high_priority) {
-                high_priority_queue.erase(key);
-                flow.remaining_bytes = new_bytes; // 更新字节数
-                high_priority_queue.insert(key); // 重新排序
-            } else {
-                flow.remaining_bytes = new_bytes;
-            }
-        } else {
-            // 队列类型改变
-            remove_from_current_queue(key);
-            flow.remaining_bytes = new_bytes;
-            requeue_flow(key, flow);
-        }
-    }
-
-    bool dispatch(std::function<void(FlowState&)> process_callback) {
-        FlowKey current_key(0, 0, 0, 0);
-        bool got_flow = false;
-
-        if (!high_priority_queue.empty()) {
-            auto it = high_priority_queue.begin();
-            current_key = *it;
-            high_priority_queue.erase(it);
-            got_flow = true;
-        } else {
-            while (!fair_scheduler_queue.empty()) {
-                current_key = fair_scheduler_queue.front();
-                fair_scheduler_queue.pop_front();
-
-                // "惰性"删除（暂时没什么用）
-                if (fair_queue_set.count(current_key)) {
-                    fair_queue_set.erase(current_key);
-                    got_flow = true;
-                    break;
-                }
-            }
-        }
-
-        if (!got_flow) {
-            return false;
-        }
-                 
-        FlowState& current_flow = flow_map.at(current_key);
-        current_flow.current_queue = QueueType::NONE;
-        process_callback(current_flow);
-
-        if (current_flow.remaining_bytes > 0) {
-            requeue_flow(current_key, current_flow); // 处理后重新入队
-        } else {
-            flow_map.erase(current_key);
-        }
-
-        return true;
-    }
-
-    bool has_flows() const {
-        return !flow_map.empty();
-    }
-
-    void set_flow_threshold(int threshold) {
-        this->flow_threshold = threshold;
-    }
+    bool AddOrUpdateFlow(const curFlowId& id, uint32_t bytesToAdd);
+    bool GetNextFlow(curFlowId& nextFlowId);
+    void RequeueFlow(const curFlowId& id);
+    bool RemoveFlow(const curFlowId& id);
+    FlowData& GetFlowData(const curFlowId& id);
+    bool IsEmpty() const;
+    size_t GetActiveFlowCount() const;
+    std::vector<curFlowId> GetAllFlowIds() const;
 
 private:
-    using FlowMapType = std::unordered_map<FlowKey, FlowState, FlowKeyHasher>;
-    
-    struct FlowKeyComparator {
-        const FlowMapType& map_ref;
-        explicit FlowKeyComparator(const FlowMapType& map) : map_ref(map) {}
-        bool operator()(const FlowKey& a, const FlowKey& b) const {
-            return map_ref.at(b) < map_ref.at(a); // PS: 这里反转了FlowState比较逻辑
-        }
-    };
-    
-    void requeue_flow(const FlowKey& key, FlowState& flow) {
-        if (flow.remaining_bytes <= this->flow_threshold) {
-            high_priority_queue.insert(key);
-            flow.current_queue = QueueType::HIGH_PRIORITY;
-        } else {
-            fair_scheduler_queue.push_back(key);
-            fair_queue_set.insert(key);
-            flow.current_queue = QueueType::FAIR;
-        }
-    }
-
-    void remove_from_current_queue(const FlowKey& key) {
-        auto it = flow_map.find(key);
-        if (it == flow_map.end()) {
-            return;
-        }
-
-        const FlowState& flow = it->second;
-        if (flow.current_queue == QueueType::HIGH_PRIORITY) {
-            high_priority_queue.erase(key);
-        } else if (flow.current_queue == QueueType::FAIR) {
-            fair_queue_set.erase(key);
-        }
-    }
-
-    int flow_threshold = 2000;
-    FlowMapType flow_map;
-    FlowKeyComparator high_priority_queue_comparator;
-    std::set<FlowKey, FlowKeyComparator> high_priority_queue;
-    std::list<FlowKey> fair_scheduler_queue;
-    std::unordered_set<FlowKey, FlowKeyHasher> fair_queue_set;
+    std::unordered_map<curFlowId, FlowData, FlowIdHasher> m_flowMap;
+    std::list<curFlowId> m_scheduleQueue;
 };
 
 class RdmaHw : public Object {
@@ -285,10 +122,8 @@ class RdmaHw : public Object {
     int ReceiveUdp(Ptr<Packet> p, CustomHeader &ch);
     int ReceiveCnp(Ptr<Packet> p, CustomHeader &ch);
     int ReceiveAck(Ptr<Packet> p, CustomHeader &ch);  // handle both ACK and NACK
-    int Receive(Ptr<Packet> p,
-                CustomHeader &
-                    ch);  // callback function that the QbbNetDevice should use when receive
-                          // packets. Only NIC can call this function. And do not call this upon PFC
+    int Receive(Ptr<Packet> p, CustomHeader &ch);  // callback function that the QbbNetDevice should use when receive packets. 
+                                                   // Only NIC can call this function. And do not call this upon PFC
 
     void CheckandSendQCN(Ptr<RdmaRxQueuePair> q);
     int ReceiverCheckSeq(uint32_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size, bool &cnp);
@@ -320,21 +155,14 @@ class RdmaHw : public Object {
     /**********************
      * Homa
      *********************/
-    bool homa_is_running = false; // 当前rdmahw的HOMA逻辑是否启用（位于接收方）
-    // 非公平HOMA
-    std::priority_queue<FlowState> request_queue; // 根据流做优先队列（HOMA非公平调度）
-    std::unordered_map<uint64_t, FlowState> request_queue_hash; // 哈希表记录哪些qp已经入队
-    uint64_t get_flow_id (uint32_t src, uint32_t dst);
-    void HandleUdpHoma(Ptr<Packet> p, CustomHeader &ch);
-    void SendHomaPkt();
-
-    // 公平HOMA
-    FlowScheduler homa_scheduler; // HOMA公平调度器
-    void HandleUdpHomaFair(Ptr<Packet> p, CustomHeader &ch);
-    void SendHomaPktFair();
-
+    FairScheduler m_fairScheduler;
+    DataRate m_totalBandwidth = DataRate("100Gbps");
+    void HandleHomaRequest(Ptr<Packet> p, CustomHeader &ch);
+    void RecalculateAndBroadcastGrants();
+    void HandleHomaFinish(const curFlowId& flowId);
+    void SendGrantPacket(const curFlowId& flowId, DataRate rate);
     int ReceiveHoma(Ptr<Packet> p, CustomHeader &ch);
-    void HandleAckHoma(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch);
+    bool IsFlowCompleted(Ptr<RdmaRxQueuePair> rxQp, Ptr<Packet> p, CustomHeader &ch);
 
     /******************************
      * Mellanox's version of DCQCN

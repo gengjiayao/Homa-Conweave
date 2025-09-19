@@ -79,17 +79,10 @@ class RdmaQueuePair : public Object {
     
     // for homa_hpcc
     uint64_t restSendSize;
-    bool is_homa_bound = false;
-    bool is_hpcc_bound = false;
     
     struct {
-        bool m_enabled = false; // 当前qp是否配置homa
-        bool m_was_request = false; // 当前qp是否发送过homa请求（unfair-homa）
-        bool m_request_again = false; // 当前qp是否再次发送homa请求（fair-homa）
-        uint32_t m_request_again_bytes = 0; // （fair-homa）
-        uint64_t m_grantedBytes = 0; // HOMA令牌桶
-        uint64_t m_init_grantedBytes = 0; // 初始化授权字节数，需要与 flow_size 取小 (todo:后续可重构)
-        uint64_t m_fly_grant_bytes = 0; // 飞行HOMA授权包的令牌数，用于配合 mtu 判断（fair-homa）
+        bool m_enable = false;
+        DataRate m_curRate;
     } homa;
     struct {
         DataRate m_targetRate;  //< Target rate
@@ -115,15 +108,7 @@ class RdmaQueuePair : public Object {
             DataRate Rc;
             uint32_t incStage;
         } hopState[IntHeader::maxHop];
-        DataRate m_grantRate; // 保存更新的HPCC-Rate
-        uint64_t m_grantedBytes; // HPCC令牌桶
-        uint64_t m_restGrantBytes; // HPCC剩余未授权令牌数
-
-        DataRate m_lastGrantRate; // 用于结算令牌桶
-        Time m_lastTime; // 用于结算令牌桶
-
-        EventId m_hpccBoundTriggerEvent;
-        bool m_homa_hpcc;
+        bool m_enable;
     } hp;
     struct {
         uint32_t m_lastUpdateSeq;
@@ -187,8 +172,6 @@ class RdmaQueuePair : public Object {
     inline bool IsFinishedConst() const { return snd_una >= m_size; }
 
     uint64_t HpGetCurWin();  // window size calculated from hp.m_curRate, used by HPCC
-
-    void UpdateGrantBytesHPCC(uint32_t mtu); // 用于更新HPCC令牌桶数量
 
     inline uint32_t GetIrnBytesInFlight() const {
         // IRN do not consider SACKed segments for simplicity

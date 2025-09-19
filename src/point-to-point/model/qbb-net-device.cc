@@ -94,8 +94,8 @@ Ptr<Packet> RdmaEgressQueue::DequeueQindex(int qIndex) {
         return p;
     }
     if (qIndex >= 0) {  // qp
-        Ptr<Packet> p = m_rdmaGetNxtPkt(m_qpGrp->Get(qIndex)); // 调用获取数据包的回调函数！终于找到你
-        m_rrlast = qIndex; // 这里更新了下一次遍历的起始qp，保证公平
+        Ptr<Packet> p = m_rdmaGetNxtPkt(m_qpGrp->Get(qIndex)); // get package
+        m_rrlast = qIndex;
         m_qlast = qIndex;
         m_traceRdmaDequeue(p, m_qpGrp->Get(qIndex)->m_pg);
         return p;
@@ -113,45 +113,34 @@ int RdmaEgressQueue::GetNextQindex(bool paused[]) {
     for (qIndex = 1; qIndex <= fcount; qIndex++) {
         if (m_qpGrp->IsQpFinished((qIndex + m_rrlast) % fcount)) continue;
         Ptr<RdmaQueuePair> qp = m_qpGrp->Get((qIndex + m_rrlast) % fcount);
-        bool cond1 = !paused[qp->m_pg]; // 此优先级的，看看是否暂停发送
-        bool cond_window_allowed =
-            (!qp->IsWinBound() && (!qp->irn.m_enabled || qp->CanIrnTransmit(m_mtu)));
+        bool cond1 = !paused[qp->m_pg]; // is paused?
+        bool cond_window_allowed = (!qp->IsWinBound() && (!qp->irn.m_enabled || qp->CanIrnTransmit(m_mtu)));
+        bool cond2 = (qp->GetBytesLeft() > 0 && cond_window_allowed); // have rest bytes can send
         
-        bool cond2 = (qp->GetBytesLeft() > 0 && cond_window_allowed); // cond2表示当前有没有剩余size没发
-        
-        bool is_homa = qp->homa.m_enabled; // homa is enable
-        bool is_homa_hpcc = qp->hp.m_homa_hpcc; // homa_hpcc is enable
-
-        qp->UpdateGrantBytesHPCC(m_mtu); // compute hpcc grant bytes
+        bool is_homa = qp->homa.m_enable; // homa is enable
+        bool is_hpcc = qp->hp.m_enable; // homa_hpcc is enable
 
         std::cout << "[RdmaEgressQueue::GetNextQindex] "
                   << "time: " << Simulator::Now().GetNanoSeconds() << " "
                 //   << "next_time: " << qp->m_nextAvail.GetNanoSeconds() << " "
                   << "node: " << Settings::ip_to_node_id(qp->sip) << " "
                   << "to: " << Settings::ip_to_node_id(qp->dip) << " "
-                  << "hp_gBytes: " << qp->hp.m_grantedBytes << " "
-                  << "homa_gBytes: " << qp->homa.m_grantedBytes << " "
-                  << "fly: " << qp->GetOnTheFly() << " "
-                  << "restSendSize: " << qp->restSendSize << " "
-                  << "hpccRestGrantSize: " << qp->hp.m_restGrantBytes << " "
-                  << "homa_again: " << qp->homa.m_request_again << " "
-                //   << "hp_rate: " << (double)qp->hp.m_grantRate.GetBitRate() / 1000000000  << " "
+                //   << "fly: " << qp->GetOnTheFly() << " "
+                //   << "restSendSize: " << qp->restSendSize << " "
+                  << "hp_rate: " << (double)qp->hp.m_curRate.GetBitRate() / 1000000000  << " "
+                  << "homa_rate: " << (double)qp->homa.m_curRate.GetBitRate() / 1000000000  << " "
                 //   << "u: " << qp->hp.u << " "
-                  << "homa_fly_gBytes: " << qp->homa.m_fly_grant_bytes << " "
                 //   << "win: " << qp->GetWin() << " "
-                //   << "cond1: " << cond1 << " " << "cond2: " << cond2 << " " 
-                //   << "cond_w: " << cond_window_allowed << " "
                   << std::endl;
         
-        // 没有要发的了，并且还没被记录成完成的，进入qp完成逻辑，homa条件下一样适用
+        // don't have rest bytes but not set qp_finish: waiting for ack
         if (!cond2 && !m_qpGrp->IsQpFinished((qIndex + m_rrlast) % fcount)) {
-            // std::cout << "[GetNextQindex] 进入判断qp是否完成的逻辑" << std::endl;
             if (qp->IsFinishedConst()) {
                 m_qpGrp->SetQpFinished((qIndex + m_rrlast) % fcount);
             }
         }
 
-        // 被暂停发送了，但是还有没发完的，homa也适用这个逻辑
+        // paused but have rest byte sizes
         if (!cond1 && cond2) {
             if (m_qpGrp->Get((qIndex + m_rrlast) % fcount)->m_nextAvail.GetTimeStep() >
                 Simulator::Now().GetTimeStep()) {
@@ -163,7 +152,7 @@ int RdmaEgressQueue::GetNextQindex(bool paused[]) {
                     current_pause_time[flowid] = Simulator::Now();
             }
         
-        // 没被暂停，并且还有没发完的，进入这个逻辑，homa要改这个
+        // can send package
         } else if (cond1 && cond2) {
             if (m_qpGrp->Get((qIndex + m_rrlast) % fcount)->m_nextAvail.GetTimeStep() >
                 Simulator::Now().GetTimeStep())  // not available now
@@ -179,29 +168,7 @@ int RdmaEgressQueue::GetNextQindex(bool paused[]) {
                     current_pause_time.erase(flowid); // 有就要移除
                 }
             }
-            
-            // 到现在就是发送状态了，有PFC的情况给去除了
-            // Homa-Hpcc结合协议
-            if (is_homa_hpcc) {
-                int threshold = (qp->restSendSize <= m_mtu) ? qp->restSendSize : m_mtu;
-                bool homa_hpcc_cond1 = (qp->homa.m_grantedBytes >= threshold && qp->hp.m_grantedBytes >= threshold);
-                bool homa_hpcc_cond2 = (qp->homa.m_fly_grant_bytes == 0 && qp->homa.m_request_again);
-                if (homa_hpcc_cond1 || homa_hpcc_cond2) {
-                    return (qIndex + m_rrlast) % fcount;
-                }
-            }
-
-            // Homa单协议
-            else if (is_homa) {
-                int threshold = (qp->restSendSize <= m_mtu) ? qp->restSendSize : m_mtu;
-                if (qp->homa.m_grantedBytes >= threshold) {
-                    return (qIndex + m_rrlast) % fcount;
-                }
-            }
-            // 非Homa协议
-            else if (!is_homa && !is_homa_hpcc) {
-                return (qIndex + m_rrlast) % fcount;
-            } 
+            return (qIndex + m_rrlast) % fcount;
         }
     }
     return -1024;
@@ -307,29 +274,28 @@ void QbbNetDevice::TransmitComplete(void) {
     m_currentPkt = 0;
     DequeueAndTransmit();
 }
-// 这是一个通用网络设备，可能是主机也可能是交换机
+// maybe host or switch
 void QbbNetDevice::DequeueAndTransmit(void) {
     NS_LOG_FUNCTION(this);
     if (!m_linkUp) return;                 // if link is down, return
     if (m_txMachineState == BUSY) return;  // Quit if channel busy
     Ptr<Packet> p;
     if (m_node->GetNodeType() == 0) {  // server
-        int qIndex = m_rdmaEQ->GetNextQindex(m_paused); // 获取下一个要发送的QP索引
-        if (qIndex != -1024) { // 判断是否为异常情况
-            if (qIndex == -1) {  // 最高优先级
+        int qIndex = m_rdmaEQ->GetNextQindex(m_paused); // get the next qp_index
+        if (qIndex != -1024) { // not ack or udp
+            if (qIndex == -1) {  // ack
                 p = m_rdmaEQ->DequeueQindex(qIndex);
                 m_traceDequeue(p, 0);
                 TransmitStart(p);
-                // std::cout << "[DequeueAndTransmit]" << std::endl;
                 return;
             }
             // a qp dequeue a packet
-            Ptr<RdmaQueuePair> lastQp = m_rdmaEQ->GetQp(qIndex); // 根据qp索引获取qp
-            p = m_rdmaEQ->DequeueQindex(qIndex); // 这个 p 就是得到的 pkg
+            Ptr<RdmaQueuePair> lastQp = m_rdmaEQ->GetQp(qIndex); // get QP from qp_index
+            p = m_rdmaEQ->DequeueQindex(qIndex); // get package from lastQp
 
             // transmit
             m_traceQpDequeue(p, lastQp);
-            TransmitStart(p); // 实际发送
+            TransmitStart(p); // actually send!
 
             // update for the next avail time
             m_rdmaPktSent(lastQp, p, m_tInterframeGap);
@@ -343,17 +309,8 @@ void QbbNetDevice::DequeueAndTransmit(void) {
                 t = Min(qp->m_nextAvail, t);
                 valid = true;
             }
-        
-            // std::cout << "[DequeueAndTransmit]" << " "
-            //           << "valid: " << valid
-            //           << "m_nextSend.IsExpired(): " << m_nextSend.IsExpired() << " "
-            //           << "t < Simulator::GetMaximumSimulationTime(): " << (t < Simulator::GetMaximumSimulationTime()) << " "
-            //           << "t > Simulator::Now(): " << (t > Simulator::Now()) << " "
-            //           << std::endl; 
+
             if (valid && m_nextSend.IsExpired() && t < Simulator::GetMaximumSimulationTime() && t > Simulator::Now()) {
-                // std::cout << "[DequeueAndTransmit] 没有数据包可发，现在要进行下一次发送的调度" << "\t"
-                //           << "after time " << t - Simulator::Now() << " " << "send next"
-                //           << std::endl;
                 m_nextSend = Simulator::Schedule(t - Simulator::Now(),
                                                  &QbbNetDevice::DequeueAndTransmit, this);
             }
@@ -433,28 +390,7 @@ void QbbNetDevice::Receive(Ptr<Packet> packet) {
     ch.getInt = 1;  // parse INT header
     packet->PeekHeader(ch);
 
-#if (MY_DEBUG == true)
-    if (m_node->GetNodeType() > 0) {
-        std::cout << "[QbbNetDevice::Receive] " << "当前为 Switch 端，节点 " << m_node->GetId() << std::endl;
-    } else {
-        std::cout << "[QbbNetDevice::Receive] " << "当前为 Host 端，节点 " << m_node->GetId() << std::endl;
-    }
-    std::cout << "[QbbNetDevice::Receive] " << "sip: " << Settings::ip_to_node_id(Ipv4Address(ch.sip)) << ", dip: " << Settings::ip_to_node_id(Ipv4Address(ch.dip)) << std::endl;
-    if (ch.l3Prot == 0xFB) { //homa
-        std::cout << "[QbbNetDevice::Receive] " << "收到 HOMA 授权包" << ", 当前时间为: " << Simulator::Now()  << std::endl;
-        std::cout << "[QbbNetDevice::Receive] " << "homa_grant_bytes: " << ch.ack.homa_grant_bytes << std::endl;
-    }
-
-    if (ch.l3Prot == 0xFC) { //ack
-        std::cout << "[QbbNetDevice::Receive] " << "收到 ACK 包" << ", 当前时间为: " << Simulator::Now() << std::endl;
-    }
-    
-    if (ch.l3Prot == 0x11) { // udp
-        std::cout << "[QbbNetDevice::Receive] " << "收到 UDP 包" << ", 当前时间为: " << Simulator::Now() << std::endl;
-    }
-#endif
-
-    if (ch.l3Prot == 0xFE) {  // PFC 先处理PFC数据包
+    if (ch.l3Prot == 0xFE) {  // PFC
         if (!m_qbbEnabled) return;
         unsigned qIndex = ch.pfc.qIndex; 
         // std::cerr << "PFC!!" << std::endl;
@@ -472,17 +408,6 @@ void QbbNetDevice::Receive(Ptr<Packet> packet) {
     } else {                              // non-PFC packets (data, ACK, NACK, CNP...)
         if (m_node->GetNodeType() > 0) {  // switch
             packet->AddPacketTag(FlowIdTag(m_ifIndex));
-#if (MY_DEBUG == true)
-            if (ch.l3Prot == 0xFB) { //homa
-                std::cout << "[QbbNetDevice::Receive] " << "传递 HOMA 包" << std::endl;
-            }
-            if (ch.l3Prot == 0xFC) { //ack
-                std::cout << "[QbbNetDevice::Receive] " << "传递 ACK 包" << std::endl;
-            }
-            if (ch.l3Prot == 0x11) { // udp
-                std::cout << "[QbbNetDevice::Receive] " << "传递 UDP 包" << std::endl;
-            }
-#endif
             m_node->SwitchReceiveFromDevice(this, packet, ch); // 继续向下传 SwitchNode::SwitchReceiveFromDevice
         } else {  // NIC
             // send to RdmaHw
@@ -545,14 +470,14 @@ bool QbbNetDevice::TransmitStart(Ptr<Packet> p) {
     //
     NS_ASSERT_MSG(m_txMachineState == READY, "Must be READY to transmit");
     m_txMachineState = BUSY;
-    m_currentPkt = p; // 当前要发送的包
+    m_currentPkt = p; // this package will be sending
     m_phyTxBeginTrace(m_currentPkt);
     Time txTime = Seconds(m_bps.CalculateTxTime(p->GetSize()));
     Time txCompleteTime = txTime + m_tInterframeGap; // 传输时间 + 帧间间隔时间
     NS_LOG_LOGIC("Schedule TransmitCompleteEvent in " << txCompleteTime.GetSeconds() << "sec");
-    Simulator::Schedule(txCompleteTime, &QbbNetDevice::TransmitComplete, this); // 模拟：发送完当前数据包，继续调用该节点的发送逻辑
+    Simulator::Schedule(txCompleteTime, &QbbNetDevice::TransmitComplete, this); // 继续调用该节点的发送逻辑
 
-    bool result = m_channel->TransmitStart(p, this, txTime); // 调度，去下一跳接收的逻辑
+    bool result = m_channel->TransmitStart(p, this, txTime); // 去执行下一跳接收的逻辑
     if (result == false) {
         m_phyTxDropTrace(p);
     }
@@ -565,7 +490,7 @@ bool QbbNetDevice::IsQbb(void) const { return true; }
 
 void QbbNetDevice::NewQp(Ptr<RdmaQueuePair> qp) {
     qp->m_nextAvail = Simulator::Now();
-    DequeueAndTransmit(); // 发送
+    DequeueAndTransmit();
 }
 void QbbNetDevice::ReassignedQp(Ptr<RdmaQueuePair> qp) { DequeueAndTransmit(); }
 void QbbNetDevice::TriggerTransmit(void) { DequeueAndTransmit(); }
@@ -608,6 +533,7 @@ void QbbNetDevice::UpdateNextAvail(Time t) {
     if (!m_nextSend.IsExpired() && t < m_nextSend.GetTs()) {
         Simulator::Cancel(m_nextSend);
         Time delta = t < Simulator::Now() ? Time(0) : t - Simulator::Now();
+        std::cout << "[QbbNetDevice::UpdateNextAvail] Node " << this->GetNode()->GetId() << " Update next send time: " << t.GetNanoSeconds() << " delta: " << delta.GetNanoSeconds() << std::endl;
         m_nextSend = Simulator::Schedule(delta, &QbbNetDevice::DequeueAndTransmit, this);
     }
 }
