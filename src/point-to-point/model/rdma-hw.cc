@@ -398,14 +398,26 @@ int RdmaHw::ReceiveHoma(Ptr<Packet> p, CustomHeader &ch) {
     uint64_t key = GetQpKey(ch.sip, dport, sport, pg);
     Ptr<RdmaQueuePair> qp = GetQp(key);
 
+    if (qp == NULL) {
+        if (akashic_Qp.find(key) != akashic_Qp.end()) {
+            // std::cout << "[ReceiveHoma] Grant packet for completed flow, ignoring. "
+            //           << "sip: " << Settings::ip_to_node_id(Ipv4Address(ch.sip)) << ", sport: " << sport
+            //           << ", dip: " << Settings::ip_to_node_id(Ipv4Address(ch.dip)) << ", dport: " << dport << std::endl;
+        } else {
+            // std::cout << "[ReceiveHoma] QP not found and not in Akashic record! "
+            //           << "sip: " << Settings::ip_to_node_id(Ipv4Address(ch.sip)) << ", sport: " << sport
+            //           << ", dip: " << Settings::ip_to_node_id(Ipv4Address(ch.dip)) << ", dport: " << dport
+            //           << " - This might indicate a race condition." << std::endl;
+        }
+        return 0; 
+    }
+
     uint32_t received_val = ch.ack.homa_grant_bytes;
-    std::cout << "[ReceiveHoma] Time: " << Simulator::Now().GetSeconds() << "s, Received raw value: " << received_val << std::endl;
     
     // Use string constructor to avoid overflow
     std::string rate_str = std::to_string(received_val) + "Mbps";
     DataRate curRate(rate_str);
 
-    std::cout << "granted rate = " << curRate.GetBitRate() / 1000000000.0 << " Gbps" << std::endl;
     qp->homa.m_curRate = curRate;
 
     return 0;
@@ -503,7 +515,7 @@ int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
         m_nic[nic_idx].dev->TriggerTransmit();
     }
 
-    if (ch.udp.homa_flag) {
+    if (ch.udp.homa_flag != 0) {
         HandleHomaRequest(p, ch);
     }
 
