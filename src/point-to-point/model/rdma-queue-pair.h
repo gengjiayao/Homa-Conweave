@@ -84,6 +84,10 @@ class RdmaQueuePair : public Object {
         bool m_enable = false;
         bool m_homa_is_running = false; // runtime state to indicate if homa is running
         DataRate m_curRate;
+        DataRate m_miceRate;    // 小流分配的速率
+        DataRate m_elephantRate; // 大流分配的速率
+        uint64_t m_flowSize;    // 流的总大小
+        uint8_t m_flowGroup;    // 流分组 (0=mice, 1=elephant)
     } homa;
     struct {
         DataRate m_targetRate;  //< Target rate

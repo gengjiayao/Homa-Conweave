@@ -7,6 +7,8 @@
 
 #include <climits>
 #include <cmath>
+#include <algorithm>
+#include <vector>
 
 #include "cn-header.h"
 #include "flow-stat-tag.h"
@@ -134,7 +136,16 @@ TypeId RdmaHw::GetTypeId(void) {
                           MakeUintegerAccessor(&RdmaHw::m_irn_bdp), MakeUintegerChecker<uint32_t>())
             .AddAttribute("L2Timeout", "Sender's timer of waiting for the ack",
                           TimeValue(MilliSeconds(4)), MakeTimeAccessor(&RdmaHw::m_waitAckTimeout),
-                          MakeTimeChecker());
+                          MakeTimeChecker())
+            .AddAttribute("EnableDynamicFlowAware", "Enable Dynamic Flow-Aware HOMA", 
+                          BooleanValue(true), MakeBooleanAccessor(&RdmaHw::m_enableDynamicFlowAware),
+                          MakeBooleanChecker())
+            .AddAttribute("HomaUpdateInterval", "HOMA update interval for flow grouping", 
+                          TimeValue(NanoSeconds(1000)), MakeTimeAccessor(&RdmaHw::m_updateInterval),
+                          MakeTimeChecker())
+            .AddAttribute("FlowSizeThreshold", "Flow size threshold for mice/elephant classification (bytes)",
+                          UintegerValue(1024 * 1024), MakeUintegerAccessor(&RdmaHw::m_flowSizeThreshold),
+                          MakeUintegerChecker<uint64_t>());
     return tid;
 }
 
@@ -142,6 +153,11 @@ RdmaHw::RdmaHw() {
     cnp_total = 0;
     cnp_by_ecn = 0;
     cnp_by_ooo = 0;
+    
+    // 初始化动态流感知调度器配置
+    m_dynamicFlowScheduler.SetPercentileThreshold(0.8);  // P80百分位
+    m_dynamicFlowScheduler.SetMiceCapacityRatio(0.2);    // 小流预留20%带宽
+    m_dynamicFlowScheduler.SetUpdateInterval(NanoSeconds(1000));  // 1000ns更新间隔
 }
 
 void RdmaHw::SetNode(Ptr<Node> node) { m_node = node; }
@@ -249,6 +265,10 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
         // HOMA控制
         qp->homa.m_enable = true;
         qp->homa.m_curRate = m_bps;
+        qp->homa.m_miceRate = DataRate(0);
+        qp->homa.m_elephantRate = DataRate(0);
+        qp->homa.m_flowSize = size;
+        qp->homa.m_flowGroup = size > qp->GetWin() ? 1 : 0; // 根据流大小分类流类型
     }
     
     // Notify Nic
@@ -320,25 +340,243 @@ void RdmaHw::DeleteRxQp(uint32_t dip, uint16_t dport, uint16_t sport, uint16_t p
     m_rxQpMap.erase(key);
 }
 
+/******************************************************************************
+ * Dynamic Flow-Aware Scheduler Implementation
+ *****************************************************************************/
+DynamicFlowAwareScheduler::DynamicFlowAwareScheduler() 
+    : m_percentileThreshold(0.8), 
+      m_miceCapacityRatio(0.2), 
+      m_updateInterval(NanoSeconds(1000)),
+      m_dynamicThreshold(0),
+      m_lastUpdateTime(Seconds(0)) {
+}
+
+DynamicFlowAwareScheduler::~DynamicFlowAwareScheduler() {
+}
+
+bool DynamicFlowAwareScheduler::AddOrUpdateFlowStats(const curFlowId& id, uint32_t bytesToAdd) {
+    bool is_new_flow = false;
+    Time now = Simulator::Now();
+    
+    auto it = m_activeFlowTable.find(id);
+    if (it == m_activeFlowTable.end()) {
+        // 新流
+        is_new_flow = true;
+        FlowStats stats;
+        stats.total_bytes_received = bytesToAdd;
+        stats.first_packet_time = now;
+        stats.last_packet_time = now;
+        stats.current_group = MICE_FLOW; // 初始默认为小流
+        
+        m_activeFlowTable[id] = stats;
+    } else {
+        // 更新现有流
+        it->second.total_bytes_received += bytesToAdd;
+        it->second.last_packet_time = now;
+    }
+    
+    return is_new_flow;
+}
+
+bool DynamicFlowAwareScheduler::RemoveFlowStats(const curFlowId& id) {
+    auto it = m_activeFlowTable.find(id);
+    if (it != m_activeFlowTable.end()) {
+        m_activeFlowTable.erase(it);
+        return true;
+    }
+    return false;
+}
+
+void DynamicFlowAwareScheduler::UpdateFlowGrouping() {
+    Time now = Simulator::Now();
+    
+    // 检查是否需要更新 (每m_updateInterval更新一次)
+    if ((now - m_lastUpdateTime) < m_updateInterval) {
+        return;
+    }
+    
+    m_lastUpdateTime = now;
+    
+    // 计算动态阈值 (P80百分位)
+    m_dynamicThreshold = CalculatePercentileThreshold();
+    
+    // 根据新阈值更新所有流的分组
+    for (auto it = m_activeFlowTable.begin(); it != m_activeFlowTable.end(); ++it) {
+        const curFlowId& flowId = it->first;
+        FlowStats& stats = it->second;
+        
+        if (stats.total_bytes_received < m_dynamicThreshold) {
+            stats.current_group = MICE_FLOW;
+        } else {
+            stats.current_group = ELEPHANT_FLOW;
+        }
+    }
+}
+
+uint64_t DynamicFlowAwareScheduler::CalculatePercentileThreshold() {
+    if (m_activeFlowTable.empty()) {
+        return 0;
+    }
+    
+    // 收集所有流的大小
+    std::vector<uint64_t> flowSizes;
+    flowSizes.reserve(m_activeFlowTable.size());
+    
+    for (auto it = m_activeFlowTable.begin(); it != m_activeFlowTable.end(); ++it) {
+        const FlowStats& stats = it->second;
+        flowSizes.push_back(stats.total_bytes_received);
+    }
+    
+    // 排序
+    std::sort(flowSizes.begin(), flowSizes.end());
+    
+    // 计算百分位
+    size_t index = static_cast<size_t>(flowSizes.size() * m_percentileThreshold);
+    if (index >= flowSizes.size()) {
+        index = flowSizes.size() - 1;
+    }
+    
+    return flowSizes[index];
+}
+
+void DynamicFlowAwareScheduler::CalculateDifferentiatedRates(DataRate totalCapacity, DataRate& rateMice, DataRate& rateElephant) {
+    size_t miceCount = GetMiceFlowCount();
+    size_t elephantCount = GetElephantFlowCount();
+    
+    if (miceCount == 0 && elephantCount == 0) {
+        rateMice = DataRate(0);
+        rateElephant = DataRate(0);
+        return;
+    }
+    
+    // 策略：小流优先，给予高速率快速完成；大流公平分享剩余带宽
+    if (miceCount > 0) {
+        // 方案1：激进策略 - 小流获得链路全速率（因为小流本身数据量小）
+        rateMice = totalCapacity;
+        
+        // 大流分享总容量（实际上由于小流很快完成，大流能获得大部分带宽时间）
+        if (elephantCount > 0) {
+            rateElephant = DataRate(totalCapacity.GetBitRate() / elephantCount);
+        } else {
+            rateElephant = DataRate(0);
+        }
+    } else {
+        // 只有大流时，公平分享
+        rateMice = DataRate(0);
+        if (elephantCount > 0) {
+            rateElephant = DataRate(totalCapacity.GetBitRate() / elephantCount);
+        } else {
+            rateElephant = DataRate(0);
+        }
+    }
+    
+    // 可选：更精细的加权模型（注释掉激进策略，使用这个）
+    /*
+    uint64_t totalBits = totalCapacity.GetBitRate();
+    uint64_t miceReservedBits = static_cast<uint64_t>(totalBits * m_miceCapacityRatio);
+    uint64_t elephantReservedBits = totalBits - miceReservedBits;
+    
+    if (miceCount > 0) {
+        rateMice = DataRate(miceReservedBits / miceCount);
+    } else {
+        rateMice = DataRate(0);
+    }
+    
+    if (elephantCount > 0) {
+        rateElephant = DataRate(elephantReservedBits / elephantCount);
+    } else {
+        rateElephant = DataRate(0);
+    }
+    */
+}
+
+FlowGroup DynamicFlowAwareScheduler::GetFlowGroup(const curFlowId& id) const {
+    auto it = m_activeFlowTable.find(id);
+    if (it != m_activeFlowTable.end()) {
+        return static_cast<FlowGroup>(it->second.current_group);
+    }
+    return MICE_FLOW; // 默认为小流
+}
+
+size_t DynamicFlowAwareScheduler::GetMiceFlowCount() const {
+    size_t count = 0;
+    for (auto it = m_activeFlowTable.begin(); it != m_activeFlowTable.end(); ++it) {
+        const FlowStats& stats = it->second;
+        if (stats.current_group == MICE_FLOW) {
+            count++;
+        }
+    }
+    return count;
+}
+
+size_t DynamicFlowAwareScheduler::GetElephantFlowCount() const {
+    size_t count = 0;
+    for (auto it = m_activeFlowTable.begin(); it != m_activeFlowTable.end(); ++it) {
+        const FlowStats& stats = it->second;
+        if (stats.current_group == ELEPHANT_FLOW) {
+            count++;
+        }
+    }
+    return count;
+}
+
+size_t DynamicFlowAwareScheduler::GetTotalFlowCount() const {
+    return m_activeFlowTable.size();
+}
+
+std::vector<curFlowId> DynamicFlowAwareScheduler::GetMiceFlows() const {
+    std::vector<curFlowId> miceFlows;
+    for (auto it = m_activeFlowTable.begin(); it != m_activeFlowTable.end(); ++it) {
+        const curFlowId& flowId = it->first;
+        const FlowStats& stats = it->second;
+        if (stats.current_group == MICE_FLOW) {
+            miceFlows.push_back(flowId);
+        }
+    }
+    return miceFlows;
+}
+
+std::vector<curFlowId> DynamicFlowAwareScheduler::GetElephantFlows() const {
+    std::vector<curFlowId> elephantFlows;
+    for (auto it = m_activeFlowTable.begin(); it != m_activeFlowTable.end(); ++it) {
+        const curFlowId& flowId = it->first;
+        const FlowStats& stats = it->second;
+        if (stats.current_group == ELEPHANT_FLOW) {
+            elephantFlows.push_back(flowId);
+        }
+    }
+    return elephantFlows;
+}
+
 void RdmaHw::HandleHomaRequest(Ptr<Packet> p, CustomHeader &ch) {
-    curFlowId cur_flow;
-    cur_flow.sport = ch.udp.dport; // 反转
-    cur_flow.dport = ch.udp.sport; // 反转
-    cur_flow.src_ip = ch.dip; // 反转
-    cur_flow.dst_ip = ch.sip; // 反转
-    cur_flow.priority = ch.udp.pg;
+    if (m_enableDynamicFlowAware) {
+        HandleHomaRequestEnhanced(p, ch);
+    } else {
+        // 原有逻辑
+        curFlowId cur_flow;
+        cur_flow.sport = ch.udp.dport; // 反转
+        cur_flow.dport = ch.udp.sport; // 反转
+        cur_flow.src_ip = ch.dip; // 反转
+        cur_flow.dst_ip = ch.sip; // 反转
+        cur_flow.priority = ch.udp.pg;
 
-    uint32_t bytes = ch.udp.homa_flag;
-    bool is_new_flow = m_fairScheduler.AddOrUpdateFlow(cur_flow, bytes);
+        uint32_t bytes = ch.udp.homa_flag;
+        bool is_new_flow = m_fairScheduler.AddOrUpdateFlow(cur_flow, bytes);
 
-    if (is_new_flow) {
-        RecalculateAndBroadcastGrants();
+        if (is_new_flow) {
+            RecalculateAndBroadcastGrants();
+        }
     }
 }
 
 void RdmaHw::HandleHomaFinish(const curFlowId& flowId) {
-    if (m_fairScheduler.RemoveFlow(flowId)) {
-        RecalculateAndBroadcastGrants();
+    if (m_enableDynamicFlowAware) {
+        HandleHomaFinishEnhanced(flowId);
+    } else {
+        // 原有逻辑
+        if (m_fairScheduler.RemoveFlow(flowId)) {
+            RecalculateAndBroadcastGrants();
+        }
     }
 }
 
@@ -389,6 +627,96 @@ void RdmaHw::SendGrantPacket(const curFlowId& flowId, DataRate rate) {
     m_nic[nic_idx].dev->TriggerTransmit();
 }
 
+/******************************************************************************
+ * Enhanced Dynamic Flow-Aware HOMA Methods
+ *****************************************************************************/
+void RdmaHw::HandleHomaRequestEnhanced(Ptr<Packet> p, CustomHeader &ch) {
+    curFlowId cur_flow;
+    cur_flow.sport = ch.udp.dport; // 反转
+    cur_flow.dport = ch.udp.sport; // 反转
+    cur_flow.src_ip = ch.dip; // 反转
+    cur_flow.dst_ip = ch.sip; // 反转
+    cur_flow.priority = ch.udp.pg;
+
+    uint32_t bytes = ch.udp.homa_flag;
+    bool is_new_flow = m_dynamicFlowScheduler.AddOrUpdateFlowStats(cur_flow, bytes);
+
+    if (is_new_flow) {
+        // 立即触发重新计算和广播
+        RecalculateAndBroadcastGrantsEnhanced();
+        
+        // 如果这是第一个流，启动周期性更新
+        if (m_dynamicFlowScheduler.GetTotalFlowCount() == 1 && !m_periodicUpdateEvent.IsRunning()) {
+            SchedulePeriodicUpdate();
+        }
+    }
+}
+
+void RdmaHw::HandleHomaFinishEnhanced(const curFlowId& flowId) {
+    if (m_dynamicFlowScheduler.RemoveFlowStats(flowId)) {
+        RecalculateAndBroadcastGrantsEnhanced();
+        
+        // 如果没有活动流了，取消周期性更新
+        if (m_dynamicFlowScheduler.GetTotalFlowCount() == 0 && m_periodicUpdateEvent.IsRunning()) {
+            Simulator::Cancel(m_periodicUpdateEvent);
+        }
+    }
+}
+
+void RdmaHw::RecalculateAndBroadcastGrantsEnhanced() {
+    // 首先更新流分组
+    m_dynamicFlowScheduler.UpdateFlowGrouping();
+    
+    size_t totalFlows = m_dynamicFlowScheduler.GetTotalFlowCount();
+    if (totalFlows == 0) {
+        return;
+    }
+    
+    // 计算差异化速率
+    DataRate rateMice, rateElephant;
+    m_dynamicFlowScheduler.CalculateDifferentiatedRates(m_totalBandwidth, rateMice, rateElephant);
+    
+    // 广播差异化的速率
+    SendDifferentiatedGrantPackets(rateMice, rateElephant);
+    
+    // 输出调试信息（可选）
+    size_t miceCount = m_dynamicFlowScheduler.GetMiceFlowCount();
+    size_t elephantCount = m_dynamicFlowScheduler.GetElephantFlowCount();
+    
+    NS_LOG_INFO("HOMA Enhanced: Mice flows=" << miceCount 
+                << " (rate=" << rateMice.GetBitRate() / 1000000 << "Mbps), "
+                << "Elephant flows=" << elephantCount 
+                << " (rate=" << rateElephant.GetBitRate() / 1000000 << "Mbps)");
+}
+
+void RdmaHw::SendDifferentiatedGrantPackets(DataRate rateMice, DataRate rateElephant) {
+    // 为小流发送授权包
+    std::vector<curFlowId> miceFlows = m_dynamicFlowScheduler.GetMiceFlows();
+    for (const auto& flowId : miceFlows) {
+        SendGrantPacket(flowId, rateMice);
+    }
+    
+    // 为大流发送授权包
+    std::vector<curFlowId> elephantFlows = m_dynamicFlowScheduler.GetElephantFlows();
+    for (const auto& flowId : elephantFlows) {
+        SendGrantPacket(flowId, rateElephant);
+    }
+}
+
+void RdmaHw::SchedulePeriodicUpdate() {
+    m_periodicUpdateEvent = Simulator::Schedule(m_updateInterval, &RdmaHw::PeriodicUpdateCallback, this);
+}
+
+void RdmaHw::PeriodicUpdateCallback() {
+    // 周期性更新流分组和速率分配
+    RecalculateAndBroadcastGrantsEnhanced();
+    
+    // 如果还有活动流，继续调度下次更新
+    if (m_dynamicFlowScheduler.GetTotalFlowCount() > 0) {
+        SchedulePeriodicUpdate();
+    }
+}
+
 int RdmaHw::ReceiveHoma(Ptr<Packet> p, CustomHeader &ch) {
     // 找到接收Homa数据包的qp
     uint16_t pg = ch.ack.pg;
@@ -417,7 +745,24 @@ int RdmaHw::ReceiveHoma(Ptr<Packet> p, CustomHeader &ch) {
     std::string rate_str = std::to_string(received_val) + "Mbps";
     DataRate curRate(rate_str);
 
-    qp->homa.m_curRate = curRate;
+    if (m_enableDynamicFlowAware) {
+        // 动态流感知模式：根据流大小判断使用哪个速率
+        // 使用简单的阈值判断：如果流大小超过1MB，认为是大流
+        if (qp->homa.m_flowSize > m_flowSizeThreshold) {
+            // 大流：使用接收到的速率作为大流速率
+            qp->homa.m_elephantRate = curRate;
+            qp->homa.m_flowGroup = 1; // ELEPHANT_FLOW
+            qp->homa.m_curRate = qp->homa.m_elephantRate;
+        } else {
+            // 小流：使用接收到的速率作为小流速率
+            qp->homa.m_miceRate = curRate;  
+            qp->homa.m_flowGroup = 0; // MICE_FLOW
+            qp->homa.m_curRate = qp->homa.m_miceRate;
+        }
+    } else {
+        // 传统模式
+        qp->homa.m_curRate = curRate;
+    }
 
     return 0;
 }

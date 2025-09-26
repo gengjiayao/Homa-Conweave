@@ -45,6 +45,22 @@ struct FlowData {
     Time lastSendTime;
 };
 
+// 新增：流统计信息结构
+struct FlowStats {
+    uint64_t total_bytes_received;  // 已接收的总字节数
+    Time first_packet_time;         // 首包到达时间
+    Time last_packet_time;          // 最近一个包到达时间
+    uint8_t current_group;          // 当前所属分组 (0=mice, 1=elephant)
+    
+    FlowStats() : total_bytes_received(0), current_group(0) {}
+};
+
+// 新增：流分组枚举
+enum FlowGroup {
+    MICE_FLOW = 0,
+    ELEPHANT_FLOW = 1
+};
+
 class FairScheduler {
 public:
     FairScheduler();
@@ -62,6 +78,54 @@ public:
 private:
     std::unordered_map<curFlowId, FlowData, FlowIdHasher> m_flowMap;
     std::list<curFlowId> m_scheduleQueue;
+};
+
+// 新增：动态流感知调度器
+class DynamicFlowAwareScheduler {
+public:
+    DynamicFlowAwareScheduler();
+    ~DynamicFlowAwareScheduler();
+
+    // 添加或更新流的统计信息
+    bool AddOrUpdateFlowStats(const curFlowId& id, uint32_t bytesToAdd);
+    
+    // 移除流统计
+    bool RemoveFlowStats(const curFlowId& id);
+    
+    // 动态分组：基于百分位的自适应阈值
+    void UpdateFlowGrouping();
+    
+    // 差异化速率分配
+    void CalculateDifferentiatedRates(DataRate totalCapacity, DataRate& rateMice, DataRate& rateElephant);
+    
+    // 获取流的分组信息
+    FlowGroup GetFlowGroup(const curFlowId& id) const;
+    
+    // 获取统计信息
+    size_t GetMiceFlowCount() const;
+    size_t GetElephantFlowCount() const;
+    size_t GetTotalFlowCount() const;
+    std::vector<curFlowId> GetMiceFlows() const;
+    std::vector<curFlowId> GetElephantFlows() const;
+    
+    // 设置配置参数
+    void SetPercentileThreshold(double percentile) { m_percentileThreshold = percentile; }
+    void SetMiceCapacityRatio(double ratio) { m_miceCapacityRatio = ratio; }
+    void SetUpdateInterval(Time interval) { m_updateInterval = interval; }
+
+private:
+    // 活动流表：记录每个流的统计信息
+    std::unordered_map<curFlowId, FlowStats, FlowIdHasher> m_activeFlowTable;
+    
+    // 配置参数
+    double m_percentileThreshold;  // 百分位阈值，默认0.8 (P80)
+    double m_miceCapacityRatio;    // 小流预留带宽比例，默认0.2 (20%)
+    Time m_updateInterval;         // 更新间隔，默认1000ns
+    uint64_t m_dynamicThreshold;   // 动态计算的大小流阈值
+    Time m_lastUpdateTime;         // 上次更新时间
+    
+    // 计算百分位阈值
+    uint64_t CalculatePercentileThreshold();
 };
 
 class RdmaHw : public Object {
@@ -153,16 +217,33 @@ class RdmaHw : public Object {
     size_t getIrnBufferOverhead();  // get buffer overhead for IRN
 
     /**********************
-     * Homa
+     * Homa - Enhanced with Dynamic Flow-Aware Weighted Rate Allocation
      *********************/
-    FairScheduler m_fairScheduler;
+    FairScheduler m_fairScheduler; // 保留原有调度器用于兼容性
+    DynamicFlowAwareScheduler m_dynamicFlowScheduler; // 新增动态流感知调度器
     DataRate m_totalBandwidth = DataRate("100Gbps");
+    
+    // 原有方法
     void HandleHomaRequest(Ptr<Packet> p, CustomHeader &ch);
     void RecalculateAndBroadcastGrants();
     void HandleHomaFinish(const curFlowId& flowId);
     void SendGrantPacket(const curFlowId& flowId, DataRate rate);
     int ReceiveHoma(Ptr<Packet> p, CustomHeader &ch);
     bool IsFlowCompleted(Ptr<RdmaRxQueuePair> rxQp, Ptr<Packet> p, CustomHeader &ch);
+    
+    // 新增动态流感知方法
+    void HandleHomaRequestEnhanced(Ptr<Packet> p, CustomHeader &ch);
+    void RecalculateAndBroadcastGrantsEnhanced();
+    void HandleHomaFinishEnhanced(const curFlowId& flowId);
+    void SendDifferentiatedGrantPackets(DataRate rateMice, DataRate rateElephant);
+    void SchedulePeriodicUpdate();
+    void PeriodicUpdateCallback();
+    
+    // 配置参数
+    bool m_enableDynamicFlowAware = true;  // 启用动态流感知功能
+    Time m_updateInterval = NanoSeconds(1000);  // 更新间隔
+    EventId m_periodicUpdateEvent;  // 周期性更新事件
+    uint64_t m_flowSizeThreshold = 1024 * 1024; // 流大小阈值(字节)，默认1MB
 
     /******************************
      * Mellanox's version of DCQCN
